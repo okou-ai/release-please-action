@@ -45891,6 +45891,9 @@ function _typeof(obj){"@babel/helpers - typeof";return _typeof="function"==typeo
 // limitations under the License.
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DefaultChangelogNotes = void 0;
+// Namespace imports let ncc include the template in the Action bundle.
+const fs = __nccwpck_require__(57147);
+const path = __nccwpck_require__(71017);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const conventionalChangelogWriter = __nccwpck_require__(86207);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -45898,7 +45901,9 @@ const presetFactory = __nccwpck_require__(88761);
 const DEFAULT_HOST = 'https://github.com';
 class DefaultChangelogNotes {
     constructor(options = {}) {
-        this.commitPartial = options.commitPartial;
+        this.commitPartial =
+            options.commitPartial ||
+                fs.readFileSync(__nccwpck_require__.ab + "default-commit.hbs", 'utf8');
         this.headerPartial = options.headerPartial;
         this.mainTemplate = options.mainTemplate;
     }
@@ -45917,8 +45922,7 @@ class DefaultChangelogNotes {
             config.types = options.changelogSections;
         }
         const preset = await presetFactory(config);
-        preset.writerOpts.commitPartial =
-            this.commitPartial || preset.writerOpts.commitPartial;
+        preset.writerOpts.commitPartial = this.commitPartial;
         preset.writerOpts.headerPartial =
             this.headerPartial || preset.writerOpts.headerPartial;
         preset.writerOpts.mainTemplate =
