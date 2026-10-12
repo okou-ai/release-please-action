@@ -29,7 +29,7 @@
   "homepage": "https://github.com/googleapis/release-please-action#readme",
   "dependencies": {
     "@actions/core": "^1.10.0",
-    "release-please": "^17.6.0"
+    "release-please": "git+https://github.com/okou-ai/release-please.git#0e54a5cef1585afdb74a69a04b8d753042e25c07"
   },
   "devDependencies": {
     "@types/mocha": "^9.0.0",
@@ -50,6 +50,6 @@
     "ignore": "dist/"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   }
 }

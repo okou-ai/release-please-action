@@ -2,6 +2,7 @@ on:
   push:
     branches:
       - main
+      - v5.0.0-okou
   pull_request:
   merge_group:
 name: ci
@@ -10,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 24]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,7 +29,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        node: [20, 24]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [20, 24]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,3 +49,4 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci
       - run: npm run build
+      - run: npm test -- --grep 'bundled release-please-action'

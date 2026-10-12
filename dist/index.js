@@ -4024,7 +4024,7 @@ module.exports = parseParams
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BranchFileCache = exports.RepositoryFileCache = exports.BranchNotFoundError = exports.FileNotFoundError = exports.DEFAULT_FILE_MODE = void 0;
 const path_1 = __nccwpck_require__(71017);
-const minimatch_1 = __nccwpck_require__(28162);
+const minimatch_1 = __nccwpck_require__(53378);
 /* eslint-disable-next-line node/no-extraneous-import */
 const request_error_1 = __nccwpck_require__(10537);
 exports.DEFAULT_FILE_MODE = '100644';
@@ -4248,7 +4248,7 @@ class BranchFileCache {
         const treeEntries = await this.getFullTree();
         if (treeEntries) {
             const found = treeEntries.find(entry => entry.path === path);
-            if (found === null || found === void 0 ? void 0 : found.sha) {
+            if ((found === null || found === void 0 ? void 0 : found.sha) && !isGitSubmodule(found)) {
                 return await this.fetchContents(found.sha, found);
             }
             throw new FileNotFoundError(path);
@@ -4260,7 +4260,7 @@ class BranchFileCache {
         for (const part of parts) {
             const { tree } = await this.getTree(treeSha);
             found = tree.find(item => item.path === part);
-            if (!(found === null || found === void 0 ? void 0 : found.sha)) {
+            if (!(found === null || found === void 0 ? void 0 : found.sha) || isGitSubmodule(found)) {
                 throw new FileNotFoundError(path);
             }
             treeSha = found.sha;
@@ -4299,8 +4299,20 @@ class BranchFileCache {
             return cached;
         }
         // try the fetch the entire tree first
-        const fetched = await this.fetchTree(sha, true);
-        if (fetched.truncated) {
+        let fetched;
+        try {
+            fetched = await this.fetchTree(sha, true);
+        }
+        catch (e) {
+            if (e instanceof request_error_1.RequestError && e.status === 422) {
+                // HTTP 422 occurs when submodules are present in the repo
+                // Fall back to non-recursive tree fetching
+            }
+            else {
+                throw e;
+            }
+        }
+        if (!fetched || fetched.truncated) {
             // we are unable to fetch the entire tree, so fetch only contents of
             // this single directory
             const singleDirectory = await this.fetchTree(sha, false);
@@ -4383,6 +4395,10 @@ class BranchFileCache {
                     !path.startsWith(pathPrefix)) {
                     continue;
                 }
+                // Git Submodules (mode === '160000' or type === 'commit'): Explicitly ignore and skip
+                if (isGitSubmodule(treeEntry)) {
+                    continue;
+                }
                 // If the result for this SHA was incomplete, dig deeper on the subtrees
                 if (!cachedTree.recursive && treeEntry.type === 'tree') {
                     treeShas.push({ ref: treeEntry.sha, path });
@@ -4416,6 +4432,9 @@ class BranchFileCache {
     }
 }
 exports.BranchFileCache = BranchFileCache;
+function isGitSubmodule(treeEntry) {
+    return (treeEntry === null || treeEntry === void 0 ? void 0 : treeEntry.mode) === '160000' || (treeEntry === null || treeEntry === void 0 ? void 0 : treeEntry.type) === 'commit';
+}
 function stripPrefix(files, prefix) {
     if (!prefix) {
         return files;
@@ -4426,1178 +4445,6 @@ function stripPrefix(files, prefix) {
         .map(file => file.replace(prefixRegex, ''));
 }
 //# sourceMappingURL=git-file-utils.js.map
-
-/***/ }),
-
-/***/ 7662:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-var balanced = __nccwpck_require__(9417);
-
-module.exports = expandTop;
-
-var escSlash = '\0SLASH'+Math.random()+'\0';
-var escOpen = '\0OPEN'+Math.random()+'\0';
-var escClose = '\0CLOSE'+Math.random()+'\0';
-var escComma = '\0COMMA'+Math.random()+'\0';
-var escPeriod = '\0PERIOD'+Math.random()+'\0';
-
-function numeric(str) {
-  return parseInt(str, 10) == str
-    ? parseInt(str, 10)
-    : str.charCodeAt(0);
-}
-
-function escapeBraces(str) {
-  return str.split('\\\\').join(escSlash)
-            .split('\\{').join(escOpen)
-            .split('\\}').join(escClose)
-            .split('\\,').join(escComma)
-            .split('\\.').join(escPeriod);
-}
-
-function unescapeBraces(str) {
-  return str.split(escSlash).join('\\')
-            .split(escOpen).join('{')
-            .split(escClose).join('}')
-            .split(escComma).join(',')
-            .split(escPeriod).join('.');
-}
-
-
-// Basically just str.split(","), but handling cases
-// where we have nested braced sections, which should be
-// treated as individual members, like {a,{b,c},d}
-function parseCommaParts(str) {
-  if (!str)
-    return [''];
-
-  var parts = [];
-  var m = balanced('{', '}', str);
-
-  if (!m)
-    return str.split(',');
-
-  var pre = m.pre;
-  var body = m.body;
-  var post = m.post;
-  var p = pre.split(',');
-
-  p[p.length-1] += '{' + body + '}';
-  var postParts = parseCommaParts(post);
-  if (post.length) {
-    p[p.length-1] += postParts.shift();
-    p.push.apply(p, postParts);
-  }
-
-  parts.push.apply(parts, p);
-
-  return parts;
-}
-
-function expandTop(str) {
-  if (!str)
-    return [];
-
-  // I don't know why Bash 4.3 does this, but it does.
-  // Anything starting with {} will have the first two bytes preserved
-  // but *only* at the top level, so {},a}b will not expand to anything,
-  // but a{},b}c will be expanded to [a}c,abc].
-  // One could argue that this is a bug in Bash, but since the goal of
-  // this module is to match Bash's rules, we escape a leading {}
-  if (str.substr(0, 2) === '{}') {
-    str = '\\{\\}' + str.substr(2);
-  }
-
-  return expand(escapeBraces(str), true).map(unescapeBraces);
-}
-
-function embrace(str) {
-  return '{' + str + '}';
-}
-function isPadded(el) {
-  return /^-?0\d/.test(el);
-}
-
-function lte(i, y) {
-  return i <= y;
-}
-function gte(i, y) {
-  return i >= y;
-}
-
-function expand(str, isTop) {
-  var expansions = [];
-
-  var m = balanced('{', '}', str);
-  if (!m) return [str];
-
-  // no need to expand pre, since it is guaranteed to be free of brace-sets
-  var pre = m.pre;
-  var post = m.post.length
-    ? expand(m.post, false)
-    : [''];
-
-  if (/\$$/.test(m.pre)) {    
-    for (var k = 0; k < post.length; k++) {
-      var expansion = pre+ '{' + m.body + '}' + post[k];
-      expansions.push(expansion);
-    }
-  } else {
-    var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
-    var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
-    var isSequence = isNumericSequence || isAlphaSequence;
-    var isOptions = m.body.indexOf(',') >= 0;
-    if (!isSequence && !isOptions) {
-      // {a},b}
-      if (m.post.match(/,(?!,).*\}/)) {
-        str = m.pre + '{' + m.body + escClose + m.post;
-        return expand(str);
-      }
-      return [str];
-    }
-
-    var n;
-    if (isSequence) {
-      n = m.body.split(/\.\./);
-    } else {
-      n = parseCommaParts(m.body);
-      if (n.length === 1) {
-        // x{{a,b}}y ==> x{a}y x{b}y
-        n = expand(n[0], false).map(embrace);
-        if (n.length === 1) {
-          return post.map(function(p) {
-            return m.pre + n[0] + p;
-          });
-        }
-      }
-    }
-
-    // at this point, n is the parts, and we know it's not a comma set
-    // with a single entry.
-    var N;
-
-    if (isSequence) {
-      var x = numeric(n[0]);
-      var y = numeric(n[1]);
-      var width = Math.max(n[0].length, n[1].length)
-      var incr = n.length == 3
-        ? Math.abs(numeric(n[2]))
-        : 1;
-      var test = lte;
-      var reverse = y < x;
-      if (reverse) {
-        incr *= -1;
-        test = gte;
-      }
-      var pad = n.some(isPadded);
-
-      N = [];
-
-      for (var i = x; test(i, y); i += incr) {
-        var c;
-        if (isAlphaSequence) {
-          c = String.fromCharCode(i);
-          if (c === '\\')
-            c = '';
-        } else {
-          c = String(i);
-          if (pad) {
-            var need = width - c.length;
-            if (need > 0) {
-              var z = new Array(need + 1).join('0');
-              if (i < 0)
-                c = '-' + z + c.slice(1);
-              else
-                c = z + c;
-            }
-          }
-        }
-        N.push(c);
-      }
-    } else {
-      N = [];
-
-      for (var j = 0; j < n.length; j++) {
-        N.push.apply(N, expand(n[j], false));
-      }
-    }
-
-    for (var j = 0; j < N.length; j++) {
-      for (var k = 0; k < post.length; k++) {
-        var expansion = pre + N[j] + post[k];
-        if (!isTop || isSequence || expansion)
-          expansions.push(expansion);
-      }
-    }
-  }
-
-  return expansions;
-}
-
-
-
-/***/ }),
-
-/***/ 14938:
-/***/ ((module) => {
-
-const isWindows = typeof process === 'object' &&
-  process &&
-  process.platform === 'win32'
-module.exports = isWindows ? { sep: '\\' } : { sep: '/' }
-
-
-/***/ }),
-
-/***/ 28162:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-const minimatch = module.exports = (p, pattern, options = {}) => {
-  assertValidPattern(pattern)
-
-  // shortcut: comments match nothing.
-  if (!options.nocomment && pattern.charAt(0) === '#') {
-    return false
-  }
-
-  return new Minimatch(pattern, options).match(p)
-}
-
-module.exports = minimatch
-
-const path = __nccwpck_require__(14938)
-minimatch.sep = path.sep
-
-const GLOBSTAR = Symbol('globstar **')
-minimatch.GLOBSTAR = GLOBSTAR
-const expand = __nccwpck_require__(7662)
-
-const plTypes = {
-  '!': { open: '(?:(?!(?:', close: '))[^/]*?)'},
-  '?': { open: '(?:', close: ')?' },
-  '+': { open: '(?:', close: ')+' },
-  '*': { open: '(?:', close: ')*' },
-  '@': { open: '(?:', close: ')' }
-}
-
-// any single thing other than /
-// don't need to escape / when using new RegExp()
-const qmark = '[^/]'
-
-// * => any number of characters
-const star = qmark + '*?'
-
-// ** when dots are allowed.  Anything goes, except .. and .
-// not (^ or / followed by one or two dots followed by $ or /),
-// followed by anything, any number of times.
-const twoStarDot = '(?:(?!(?:\\\/|^)(?:\\.{1,2})($|\\\/)).)*?'
-
-// not a ^ or / followed by a dot,
-// followed by anything, any number of times.
-const twoStarNoDot = '(?:(?!(?:\\\/|^)\\.).)*?'
-
-// "abc" -> { a:true, b:true, c:true }
-const charSet = s => s.split('').reduce((set, c) => {
-  set[c] = true
-  return set
-}, {})
-
-// characters that need to be escaped in RegExp.
-const reSpecials = charSet('().*{}+?[]^$\\!')
-
-// characters that indicate we have to add the pattern start
-const addPatternStartSet = charSet('[.(')
-
-// normalizes slashes.
-const slashSplit = /\/+/
-
-minimatch.filter = (pattern, options = {}) =>
-  (p, i, list) => minimatch(p, pattern, options)
-
-const ext = (a, b = {}) => {
-  const t = {}
-  Object.keys(a).forEach(k => t[k] = a[k])
-  Object.keys(b).forEach(k => t[k] = b[k])
-  return t
-}
-
-minimatch.defaults = def => {
-  if (!def || typeof def !== 'object' || !Object.keys(def).length) {
-    return minimatch
-  }
-
-  const orig = minimatch
-
-  const m = (p, pattern, options) => orig(p, pattern, ext(def, options))
-  m.Minimatch = class Minimatch extends orig.Minimatch {
-    constructor (pattern, options) {
-      super(pattern, ext(def, options))
-    }
-  }
-  m.Minimatch.defaults = options => orig.defaults(ext(def, options)).Minimatch
-  m.filter = (pattern, options) => orig.filter(pattern, ext(def, options))
-  m.defaults = options => orig.defaults(ext(def, options))
-  m.makeRe = (pattern, options) => orig.makeRe(pattern, ext(def, options))
-  m.braceExpand = (pattern, options) => orig.braceExpand(pattern, ext(def, options))
-  m.match = (list, pattern, options) => orig.match(list, pattern, ext(def, options))
-
-  return m
-}
-
-
-
-
-
-// Brace expansion:
-// a{b,c}d -> abd acd
-// a{b,}c -> abc ac
-// a{0..3}d -> a0d a1d a2d a3d
-// a{b,c{d,e}f}g -> abg acdfg acefg
-// a{b,c}d{e,f}g -> abdeg acdeg abdeg abdfg
-//
-// Invalid sets are not expanded.
-// a{2..}b -> a{2..}b
-// a{b}c -> a{b}c
-minimatch.braceExpand = (pattern, options) => braceExpand(pattern, options)
-
-const braceExpand = (pattern, options = {}) => {
-  assertValidPattern(pattern)
-
-  // Thanks to Yeting Li <https://github.com/yetingli> for
-  // improving this regexp to avoid a ReDOS vulnerability.
-  if (options.nobrace || !/\{(?:(?!\{).)*\}/.test(pattern)) {
-    // shortcut. no need to expand.
-    return [pattern]
-  }
-
-  return expand(pattern)
-}
-
-const MAX_PATTERN_LENGTH = 1024 * 64
-const assertValidPattern = pattern => {
-  if (typeof pattern !== 'string') {
-    throw new TypeError('invalid pattern')
-  }
-
-  if (pattern.length > MAX_PATTERN_LENGTH) {
-    throw new TypeError('pattern is too long')
-  }
-}
-
-// parse a component of the expanded set.
-// At this point, no pattern may contain "/" in it
-// so we're going to return a 2d array, where each entry is the full
-// pattern, split on '/', and then turned into a regular expression.
-// A regexp is made at the end which joins each array with an
-// escaped /, and another full one which joins each regexp with |.
-//
-// Following the lead of Bash 4.1, note that "**" only has special meaning
-// when it is the *only* thing in a path portion.  Otherwise, any series
-// of * is equivalent to a single *.  Globstar behavior is enabled by
-// default, and can be disabled by setting options.noglobstar.
-const SUBPARSE = Symbol('subparse')
-
-minimatch.makeRe = (pattern, options) =>
-  new Minimatch(pattern, options || {}).makeRe()
-
-minimatch.match = (list, pattern, options = {}) => {
-  const mm = new Minimatch(pattern, options)
-  list = list.filter(f => mm.match(f))
-  if (mm.options.nonull && !list.length) {
-    list.push(pattern)
-  }
-  return list
-}
-
-// replace stuff like \* with *
-const globUnescape = s => s.replace(/\\(.)/g, '$1')
-const charUnescape = s => s.replace(/\\([^-\]])/g, '$1')
-const regExpEscape = s => s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
-const braExpEscape = s => s.replace(/[[\]\\]/g, '\\$&')
-
-class Minimatch {
-  constructor (pattern, options) {
-    assertValidPattern(pattern)
-
-    if (!options) options = {}
-
-    this.options = options
-    this.set = []
-    this.pattern = pattern
-    this.windowsPathsNoEscape = !!options.windowsPathsNoEscape ||
-      options.allowWindowsEscape === false
-    if (this.windowsPathsNoEscape) {
-      this.pattern = this.pattern.replace(/\\/g, '/')
-    }
-    this.regexp = null
-    this.negate = false
-    this.comment = false
-    this.empty = false
-    this.partial = !!options.partial
-
-    // make the set of regexps etc.
-    this.make()
-  }
-
-  debug () {}
-
-  make () {
-    const pattern = this.pattern
-    const options = this.options
-
-    // empty patterns and comments match nothing.
-    if (!options.nocomment && pattern.charAt(0) === '#') {
-      this.comment = true
-      return
-    }
-    if (!pattern) {
-      this.empty = true
-      return
-    }
-
-    // step 1: figure out negation, etc.
-    this.parseNegate()
-
-    // step 2: expand braces
-    let set = this.globSet = this.braceExpand()
-
-    if (options.debug) this.debug = (...args) => console.error(...args)
-
-    this.debug(this.pattern, set)
-
-    // step 3: now we have a set, so turn each one into a series of path-portion
-    // matching patterns.
-    // These will be regexps, except in the case of "**", which is
-    // set to the GLOBSTAR object for globstar behavior,
-    // and will not contain any / characters
-    set = this.globParts = set.map(s => s.split(slashSplit))
-
-    this.debug(this.pattern, set)
-
-    // glob --> regexps
-    set = set.map((s, si, set) => s.map(this.parse, this))
-
-    this.debug(this.pattern, set)
-
-    // filter out everything that didn't compile properly.
-    set = set.filter(s => s.indexOf(false) === -1)
-
-    this.debug(this.pattern, set)
-
-    this.set = set
-  }
-
-  parseNegate () {
-    if (this.options.nonegate) return
-
-    const pattern = this.pattern
-    let negate = false
-    let negateOffset = 0
-
-    for (let i = 0; i < pattern.length && pattern.charAt(i) === '!'; i++) {
-      negate = !negate
-      negateOffset++
-    }
-
-    if (negateOffset) this.pattern = pattern.slice(negateOffset)
-    this.negate = negate
-  }
-
-  // set partial to true to test if, for example,
-  // "/a/b" matches the start of "/*/b/*/d"
-  // Partial means, if you run out of file before you run
-  // out of pattern, then that's fine, as long as all
-  // the parts match.
-  matchOne (file, pattern, partial) {
-    var options = this.options
-
-    this.debug('matchOne',
-      { 'this': this, file: file, pattern: pattern })
-
-    this.debug('matchOne', file.length, pattern.length)
-
-    for (var fi = 0,
-        pi = 0,
-        fl = file.length,
-        pl = pattern.length
-        ; (fi < fl) && (pi < pl)
-        ; fi++, pi++) {
-      this.debug('matchOne loop')
-      var p = pattern[pi]
-      var f = file[fi]
-
-      this.debug(pattern, p, f)
-
-      // should be impossible.
-      // some invalid regexp stuff in the set.
-      /* istanbul ignore if */
-      if (p === false) return false
-
-      if (p === GLOBSTAR) {
-        this.debug('GLOBSTAR', [pattern, p, f])
-
-        // "**"
-        // a/**/b/**/c would match the following:
-        // a/b/x/y/z/c
-        // a/x/y/z/b/c
-        // a/b/x/b/x/c
-        // a/b/c
-        // To do this, take the rest of the pattern after
-        // the **, and see if it would match the file remainder.
-        // If so, return success.
-        // If not, the ** "swallows" a segment, and try again.
-        // This is recursively awful.
-        //
-        // a/**/b/**/c matching a/b/x/y/z/c
-        // - a matches a
-        // - doublestar
-        //   - matchOne(b/x/y/z/c, b/**/c)
-        //     - b matches b
-        //     - doublestar
-        //       - matchOne(x/y/z/c, c) -> no
-        //       - matchOne(y/z/c, c) -> no
-        //       - matchOne(z/c, c) -> no
-        //       - matchOne(c, c) yes, hit
-        var fr = fi
-        var pr = pi + 1
-        if (pr === pl) {
-          this.debug('** at the end')
-          // a ** at the end will just swallow the rest.
-          // We have found a match.
-          // however, it will not swallow /.x, unless
-          // options.dot is set.
-          // . and .. are *never* matched by **, for explosively
-          // exponential reasons.
-          for (; fi < fl; fi++) {
-            if (file[fi] === '.' || file[fi] === '..' ||
-              (!options.dot && file[fi].charAt(0) === '.')) return false
-          }
-          return true
-        }
-
-        // ok, let's see if we can swallow whatever we can.
-        while (fr < fl) {
-          var swallowee = file[fr]
-
-          this.debug('\nglobstar while', file, fr, pattern, pr, swallowee)
-
-          // XXX remove this slice.  Just pass the start index.
-          if (this.matchOne(file.slice(fr), pattern.slice(pr), partial)) {
-            this.debug('globstar found match!', fr, fl, swallowee)
-            // found a match.
-            return true
-          } else {
-            // can't swallow "." or ".." ever.
-            // can only swallow ".foo" when explicitly asked.
-            if (swallowee === '.' || swallowee === '..' ||
-              (!options.dot && swallowee.charAt(0) === '.')) {
-              this.debug('dot detected!', file, fr, pattern, pr)
-              break
-            }
-
-            // ** swallows a segment, and continue.
-            this.debug('globstar swallow a segment, and continue')
-            fr++
-          }
-        }
-
-        // no match was found.
-        // However, in partial mode, we can't say this is necessarily over.
-        // If there's more *pattern* left, then
-        /* istanbul ignore if */
-        if (partial) {
-          // ran out of file
-          this.debug('\n>>> no match, partial?', file, fr, pattern, pr)
-          if (fr === fl) return true
-        }
-        return false
-      }
-
-      // something other than **
-      // non-magic patterns just have to match exactly
-      // patterns with magic have been turned into regexps.
-      var hit
-      if (typeof p === 'string') {
-        hit = f === p
-        this.debug('string match', p, f, hit)
-      } else {
-        hit = f.match(p)
-        this.debug('pattern match', p, f, hit)
-      }
-
-      if (!hit) return false
-    }
-
-    // Note: ending in / means that we'll get a final ""
-    // at the end of the pattern.  This can only match a
-    // corresponding "" at the end of the file.
-    // If the file ends in /, then it can only match a
-    // a pattern that ends in /, unless the pattern just
-    // doesn't have any more for it. But, a/b/ should *not*
-    // match "a/b/*", even though "" matches against the
-    // [^/]*? pattern, except in partial mode, where it might
-    // simply not be reached yet.
-    // However, a/b/ should still satisfy a/*
-
-    // now either we fell off the end of the pattern, or we're done.
-    if (fi === fl && pi === pl) {
-      // ran out of pattern and filename at the same time.
-      // an exact hit!
-      return true
-    } else if (fi === fl) {
-      // ran out of file, but still had pattern left.
-      // this is ok if we're doing the match as part of
-      // a glob fs traversal.
-      return partial
-    } else /* istanbul ignore else */ if (pi === pl) {
-      // ran out of pattern, still have file left.
-      // this is only acceptable if we're on the very last
-      // empty segment of a file with a trailing slash.
-      // a/* should match a/b/
-      return (fi === fl - 1) && (file[fi] === '')
-    }
-
-    // should be unreachable.
-    /* istanbul ignore next */
-    throw new Error('wtf?')
-  }
-
-  braceExpand () {
-    return braceExpand(this.pattern, this.options)
-  }
-
-  parse (pattern, isSub) {
-    assertValidPattern(pattern)
-
-    const options = this.options
-
-    // shortcuts
-    if (pattern === '**') {
-      if (!options.noglobstar)
-        return GLOBSTAR
-      else
-        pattern = '*'
-    }
-    if (pattern === '') return ''
-
-    let re = ''
-    let hasMagic = false
-    let escaping = false
-    // ? => one single character
-    const patternListStack = []
-    const negativeLists = []
-    let stateChar
-    let inClass = false
-    let reClassStart = -1
-    let classStart = -1
-    let cs
-    let pl
-    let sp
-    // . and .. never match anything that doesn't start with .,
-    // even when options.dot is set.  However, if the pattern
-    // starts with ., then traversal patterns can match.
-    let dotTravAllowed = pattern.charAt(0) === '.'
-    let dotFileAllowed = options.dot || dotTravAllowed
-    const patternStart = () =>
-      dotTravAllowed
-        ? ''
-        : dotFileAllowed
-        ? '(?!(?:^|\\/)\\.{1,2}(?:$|\\/))'
-        : '(?!\\.)'
-    const subPatternStart = (p) =>
-      p.charAt(0) === '.'
-        ? ''
-        : options.dot
-        ? '(?!(?:^|\\/)\\.{1,2}(?:$|\\/))'
-        : '(?!\\.)'
-
-
-    const clearStateChar = () => {
-      if (stateChar) {
-        // we had some state-tracking character
-        // that wasn't consumed by this pass.
-        switch (stateChar) {
-          case '*':
-            re += star
-            hasMagic = true
-          break
-          case '?':
-            re += qmark
-            hasMagic = true
-          break
-          default:
-            re += '\\' + stateChar
-          break
-        }
-        this.debug('clearStateChar %j %j', stateChar, re)
-        stateChar = false
-      }
-    }
-
-    for (let i = 0, c; (i < pattern.length) && (c = pattern.charAt(i)); i++) {
-      this.debug('%s\t%s %s %j', pattern, i, re, c)
-
-      // skip over any that are escaped.
-      if (escaping) {
-        /* istanbul ignore next - completely not allowed, even escaped. */
-        if (c === '/') {
-          return false
-        }
-
-        if (reSpecials[c]) {
-          re += '\\'
-        }
-        re += c
-        escaping = false
-        continue
-      }
-
-      switch (c) {
-        /* istanbul ignore next */
-        case '/': {
-          // Should already be path-split by now.
-          return false
-        }
-
-        case '\\':
-          if (inClass && pattern.charAt(i + 1) === '-') {
-            re += c
-            continue
-          }
-
-          clearStateChar()
-          escaping = true
-        continue
-
-        // the various stateChar values
-        // for the "extglob" stuff.
-        case '?':
-        case '*':
-        case '+':
-        case '@':
-        case '!':
-          this.debug('%s\t%s %s %j <-- stateChar', pattern, i, re, c)
-
-          // all of those are literals inside a class, except that
-          // the glob [!a] means [^a] in regexp
-          if (inClass) {
-            this.debug('  in class')
-            if (c === '!' && i === classStart + 1) c = '^'
-            re += c
-            continue
-          }
-
-          // if we already have a stateChar, then it means
-          // that there was something like ** or +? in there.
-          // Handle the stateChar, then proceed with this one.
-          this.debug('call clearStateChar %j', stateChar)
-          clearStateChar()
-          stateChar = c
-          // if extglob is disabled, then +(asdf|foo) isn't a thing.
-          // just clear the statechar *now*, rather than even diving into
-          // the patternList stuff.
-          if (options.noext) clearStateChar()
-        continue
-
-        case '(': {
-          if (inClass) {
-            re += '('
-            continue
-          }
-
-          if (!stateChar) {
-            re += '\\('
-            continue
-          }
-
-          const plEntry = {
-            type: stateChar,
-            start: i - 1,
-            reStart: re.length,
-            open: plTypes[stateChar].open,
-            close: plTypes[stateChar].close,
-          }
-          this.debug(this.pattern, '\t', plEntry)
-          patternListStack.push(plEntry)
-          // negation is (?:(?!(?:js)(?:<rest>))[^/]*)
-          re += plEntry.open
-          // next entry starts with a dot maybe?
-          if (plEntry.start === 0 && plEntry.type !== '!') {
-            dotTravAllowed = true
-            re += subPatternStart(pattern.slice(i + 1))
-          }
-          this.debug('plType %j %j', stateChar, re)
-          stateChar = false
-          continue
-        }
-
-        case ')': {
-          const plEntry = patternListStack[patternListStack.length - 1]
-          if (inClass || !plEntry) {
-            re += '\\)'
-            continue
-          }
-          patternListStack.pop()
-
-          // closing an extglob
-          clearStateChar()
-          hasMagic = true
-          pl = plEntry
-          // negation is (?:(?!js)[^/]*)
-          // The others are (?:<pattern>)<type>
-          re += pl.close
-          if (pl.type === '!') {
-            negativeLists.push(Object.assign(pl, { reEnd: re.length }))
-          }
-          continue
-        }
-
-        case '|': {
-          const plEntry = patternListStack[patternListStack.length - 1]
-          if (inClass || !plEntry) {
-            re += '\\|'
-            continue
-          }
-
-          clearStateChar()
-          re += '|'
-          // next subpattern can start with a dot?
-          if (plEntry.start === 0 && plEntry.type !== '!') {
-            dotTravAllowed = true
-            re += subPatternStart(pattern.slice(i + 1))
-          }
-          continue
-        }
-
-        // these are mostly the same in regexp and glob
-        case '[':
-          // swallow any state-tracking char before the [
-          clearStateChar()
-
-          if (inClass) {
-            re += '\\' + c
-            continue
-          }
-
-          inClass = true
-          classStart = i
-          reClassStart = re.length
-          re += c
-        continue
-
-        case ']':
-          //  a right bracket shall lose its special
-          //  meaning and represent itself in
-          //  a bracket expression if it occurs
-          //  first in the list.  -- POSIX.2 2.8.3.2
-          if (i === classStart + 1 || !inClass) {
-            re += '\\' + c
-            continue
-          }
-
-          // split where the last [ was, make sure we don't have
-          // an invalid re. if so, re-walk the contents of the
-          // would-be class to re-translate any characters that
-          // were passed through as-is
-          // TODO: It would probably be faster to determine this
-          // without a try/catch and a new RegExp, but it's tricky
-          // to do safely.  For now, this is safe and works.
-          cs = pattern.substring(classStart + 1, i)
-          try {
-            RegExp('[' + braExpEscape(charUnescape(cs)) + ']')
-            // looks good, finish up the class.
-            re += c
-          } catch (er) {
-            // out of order ranges in JS are errors, but in glob syntax,
-            // they're just a range that matches nothing.
-            re = re.substring(0, reClassStart) + '(?:$.)' // match nothing ever
-          }
-          hasMagic = true
-          inClass = false
-        continue
-
-        default:
-          // swallow any state char that wasn't consumed
-          clearStateChar()
-
-          if (reSpecials[c] && !(c === '^' && inClass)) {
-            re += '\\'
-          }
-
-          re += c
-          break
-
-      } // switch
-    } // for
-
-    // handle the case where we left a class open.
-    // "[abc" is valid, equivalent to "\[abc"
-    if (inClass) {
-      // split where the last [ was, and escape it
-      // this is a huge pita.  We now have to re-walk
-      // the contents of the would-be class to re-translate
-      // any characters that were passed through as-is
-      cs = pattern.slice(classStart + 1)
-      sp = this.parse(cs, SUBPARSE)
-      re = re.substring(0, reClassStart) + '\\[' + sp[0]
-      hasMagic = hasMagic || sp[1]
-    }
-
-    // handle the case where we had a +( thing at the *end*
-    // of the pattern.
-    // each pattern list stack adds 3 chars, and we need to go through
-    // and escape any | chars that were passed through as-is for the regexp.
-    // Go through and escape them, taking care not to double-escape any
-    // | chars that were already escaped.
-    for (pl = patternListStack.pop(); pl; pl = patternListStack.pop()) {
-      let tail
-      tail = re.slice(pl.reStart + pl.open.length)
-      this.debug('setting tail', re, pl)
-      // maybe some even number of \, then maybe 1 \, followed by a |
-      tail = tail.replace(/((?:\\{2}){0,64})(\\?)\|/g, (_, $1, $2) => {
-        /* istanbul ignore else - should already be done */
-        if (!$2) {
-          // the | isn't already escaped, so escape it.
-          $2 = '\\'
-        }
-
-        // need to escape all those slashes *again*, without escaping the
-        // one that we need for escaping the | character.  As it works out,
-        // escaping an even number of slashes can be done by simply repeating
-        // it exactly after itself.  That's why this trick works.
-        //
-        // I am sorry that you have to see this.
-        return $1 + $1 + $2 + '|'
-      })
-
-      this.debug('tail=%j\n   %s', tail, tail, pl, re)
-      const t = pl.type === '*' ? star
-        : pl.type === '?' ? qmark
-        : '\\' + pl.type
-
-      hasMagic = true
-      re = re.slice(0, pl.reStart) + t + '\\(' + tail
-    }
-
-    // handle trailing things that only matter at the very end.
-    clearStateChar()
-    if (escaping) {
-      // trailing \\
-      re += '\\\\'
-    }
-
-    // only need to apply the nodot start if the re starts with
-    // something that could conceivably capture a dot
-    const addPatternStart = addPatternStartSet[re.charAt(0)]
-
-    // Hack to work around lack of negative lookbehind in JS
-    // A pattern like: *.!(x).!(y|z) needs to ensure that a name
-    // like 'a.xyz.yz' doesn't match.  So, the first negative
-    // lookahead, has to look ALL the way ahead, to the end of
-    // the pattern.
-    for (let n = negativeLists.length - 1; n > -1; n--) {
-      const nl = negativeLists[n]
-
-      const nlBefore = re.slice(0, nl.reStart)
-      const nlFirst = re.slice(nl.reStart, nl.reEnd - 8)
-      let nlAfter = re.slice(nl.reEnd)
-      const nlLast = re.slice(nl.reEnd - 8, nl.reEnd) + nlAfter
-
-      // Handle nested stuff like *(*.js|!(*.json)), where open parens
-      // mean that we should *not* include the ) in the bit that is considered
-      // "after" the negated section.
-      const closeParensBefore = nlBefore.split(')').length
-      const openParensBefore = nlBefore.split('(').length - closeParensBefore
-      let cleanAfter = nlAfter
-      for (let i = 0; i < openParensBefore; i++) {
-        cleanAfter = cleanAfter.replace(/\)[+*?]?/, '')
-      }
-      nlAfter = cleanAfter
-
-      const dollar = nlAfter === '' && isSub !== SUBPARSE ? '(?:$|\\/)' : ''
-
-      re = nlBefore + nlFirst + nlAfter + dollar + nlLast
-    }
-
-    // if the re is not "" at this point, then we need to make sure
-    // it doesn't match against an empty path part.
-    // Otherwise a/* will match a/, which it should not.
-    if (re !== '' && hasMagic) {
-      re = '(?=.)' + re
-    }
-
-    if (addPatternStart) {
-      re = patternStart() + re
-    }
-
-    // parsing just a piece of a larger pattern.
-    if (isSub === SUBPARSE) {
-      return [re, hasMagic]
-    }
-
-    // if it's nocase, and the lcase/uppercase don't match, it's magic
-    if (options.nocase && !hasMagic) {
-      hasMagic = pattern.toUpperCase() !== pattern.toLowerCase()
-    }
-
-    // skip the regexp for non-magical patterns
-    // unescape anything in it, though, so that it'll be
-    // an exact match against a file etc.
-    if (!hasMagic) {
-      return globUnescape(pattern)
-    }
-
-    const flags = options.nocase ? 'i' : ''
-    try {
-      return Object.assign(new RegExp('^' + re + '$', flags), {
-        _glob: pattern,
-        _src: re,
-      })
-    } catch (er) /* istanbul ignore next - should be impossible */ {
-      // If it was an invalid regular expression, then it can't match
-      // anything.  This trick looks for a character after the end of
-      // the string, which is of course impossible, except in multi-line
-      // mode, but it's not a /m regex.
-      return new RegExp('$.')
-    }
-  }
-
-  makeRe () {
-    if (this.regexp || this.regexp === false) return this.regexp
-
-    // at this point, this.set is a 2d array of partial
-    // pattern strings, or "**".
-    //
-    // It's better to use .match().  This function shouldn't
-    // be used, really, but it's pretty convenient sometimes,
-    // when you just want to work with a regex.
-    const set = this.set
-
-    if (!set.length) {
-      this.regexp = false
-      return this.regexp
-    }
-    const options = this.options
-
-    const twoStar = options.noglobstar ? star
-      : options.dot ? twoStarDot
-      : twoStarNoDot
-    const flags = options.nocase ? 'i' : ''
-
-    // coalesce globstars and regexpify non-globstar patterns
-    // if it's the only item, then we just do one twoStar
-    // if it's the first, and there are more, prepend (\/|twoStar\/)? to next
-    // if it's the last, append (\/twoStar|) to previous
-    // if it's in the middle, append (\/|\/twoStar\/) to previous
-    // then filter out GLOBSTAR symbols
-    let re = set.map(pattern => {
-      pattern = pattern.map(p =>
-        typeof p === 'string' ? regExpEscape(p)
-        : p === GLOBSTAR ? GLOBSTAR
-        : p._src
-      ).reduce((set, p) => {
-        if (!(set[set.length - 1] === GLOBSTAR && p === GLOBSTAR)) {
-          set.push(p)
-        }
-        return set
-      }, [])
-      pattern.forEach((p, i) => {
-        if (p !== GLOBSTAR || pattern[i-1] === GLOBSTAR) {
-          return
-        }
-        if (i === 0) {
-          if (pattern.length > 1) {
-            pattern[i+1] = '(?:\\\/|' + twoStar + '\\\/)?' + pattern[i+1]
-          } else {
-            pattern[i] = twoStar
-          }
-        } else if (i === pattern.length - 1) {
-          pattern[i-1] += '(?:\\\/|' + twoStar + ')?'
-        } else {
-          pattern[i-1] += '(?:\\\/|\\\/' + twoStar + '\\\/)' + pattern[i+1]
-          pattern[i+1] = GLOBSTAR
-        }
-      })
-      return pattern.filter(p => p !== GLOBSTAR).join('/')
-    }).join('|')
-
-    // must match entire pattern
-    // ending in a * or ** will make it less strict.
-    re = '^(?:' + re + ')$'
-
-    // can match anything, as long as it's not this.
-    if (this.negate) re = '^(?!' + re + ').*$'
-
-    try {
-      this.regexp = new RegExp(re, flags)
-    } catch (ex) /* istanbul ignore next - should be impossible */ {
-      this.regexp = false
-    }
-    return this.regexp
-  }
-
-  match (f, partial = this.partial) {
-    this.debug('match', f, this.pattern)
-    // short-circuit in the case of busted things.
-    // comments, etc.
-    if (this.comment) return false
-    if (this.empty) return f === ''
-
-    if (f === '/' && partial) return true
-
-    const options = this.options
-
-    // windows: need to use /, not \
-    if (path.sep !== '/') {
-      f = f.split(path.sep).join('/')
-    }
-
-    // treat the test path as a set of pathparts.
-    f = f.split(slashSplit)
-    this.debug(this.pattern, 'split', f)
-
-    // just ONE of the pattern sets in this.set needs to match
-    // in order for it to be valid.  If negating, then just one
-    // match means that we have failed.
-    // Either way, return on the first hit.
-
-    const set = this.set
-    this.debug(this.pattern, 'set', set)
-
-    // Find the basename of the path by looking for the last non-empty segment
-    let filename
-    for (let i = f.length - 1; i >= 0; i--) {
-      filename = f[i]
-      if (filename) break
-    }
-
-    for (let i = 0; i < set.length; i++) {
-      const pattern = set[i]
-      let file = f
-      if (options.matchBase && pattern.length === 1) {
-        file = [filename]
-      }
-      const hit = this.matchOne(file, pattern, partial)
-      if (hit) {
-        if (options.flipNegate) return true
-        return !this.negate
-      }
-    }
-
-    // didn't get any hits.  this is success if it's a negative
-    // pattern, failure otherwise.
-    if (options.flipNegate) return false
-    return this.negate
-  }
-
-  static defaults (def) {
-    return minimatch.defaults(def).Minimatch
-  }
-}
-
-minimatch.Minimatch = Minimatch
-
 
 /***/ }),
 
@@ -17376,76 +16223,6 @@ module.exports = retry;
 
 /***/ }),
 
-/***/ 9417:
-/***/ ((module) => {
-
-"use strict";
-
-module.exports = balanced;
-function balanced(a, b, str) {
-  if (a instanceof RegExp) a = maybeMatch(a, str);
-  if (b instanceof RegExp) b = maybeMatch(b, str);
-
-  var r = range(a, b, str);
-
-  return r && {
-    start: r[0],
-    end: r[1],
-    pre: str.slice(0, r[0]),
-    body: str.slice(r[0] + a.length, r[1]),
-    post: str.slice(r[1] + b.length)
-  };
-}
-
-function maybeMatch(reg, str) {
-  var m = str.match(reg);
-  return m ? m[0] : null;
-}
-
-balanced.range = range;
-function range(a, b, str) {
-  var begs, beg, left, right, result;
-  var ai = str.indexOf(a);
-  var bi = str.indexOf(b, ai + 1);
-  var i = ai;
-
-  if (ai >= 0 && bi > 0) {
-    if(a===b) {
-      return [ai, bi];
-    }
-    begs = [];
-    left = str.length;
-
-    while (i >= 0 && !result) {
-      if (i == ai) {
-        begs.push(i);
-        ai = str.indexOf(a, i + 1);
-      } else if (begs.length == 1) {
-        result = [ begs.pop(), bi ];
-      } else {
-        beg = begs.pop();
-        if (beg < left) {
-          left = beg;
-          right = bi;
-        }
-
-        bi = str.indexOf(b, i + 1);
-      }
-
-      i = ai < bi && ai >= 0 ? ai : bi;
-    }
-
-    if (begs.length) {
-      result = [ left, right ];
-    }
-  }
-
-  return result;
-}
-
-
-/***/ }),
-
 /***/ 83682:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -18064,1634 +16841,6 @@ module.exports = {
 	stringEncaseCRLFWithFirstIndex
 };
 
-
-/***/ }),
-
-/***/ 49988:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getDiffString = exports.getChanges = exports.parseChanges = exports.getAllDiffs = exports.getGitFileData = exports.findRepoRoot = exports.resolvePath = void 0;
-const child_process_1 = __nccwpck_require__(32081);
-const types_1 = __nccwpck_require__(13984);
-const logger_1 = __nccwpck_require__(58192);
-const fs_1 = __nccwpck_require__(57147);
-const path = __nccwpck_require__(71017);
-class InstallationError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = 'InstallationError';
-    }
-}
-/**
- * Get the absolute path of a relative path
- * @param {string} dir the wildcard directory containing git change, not necessarily the root git directory
- * @returns {string} the absolute path relative to the path that the user executed the bash command in
- */
-function resolvePath(dir) {
-    const absoluteDir = path.resolve(process.cwd(), dir);
-    return absoluteDir;
-}
-exports.resolvePath = resolvePath;
-/**
- * Get the git root directory.
- * Errors if the directory provided is not a git directory.
- * @param {string} dir an absolute directory
- * @returns {string} the absolute path of the git directory root
- */
-function findRepoRoot(dir) {
-    try {
-        return (0, child_process_1.execSync)('git rev-parse --show-toplevel', { cwd: dir })
-            .toString()
-            .trimRight(); // remove the trailing \n
-    }
-    catch (err) {
-        logger_1.logger.error(`The directory provided is not a git directory: ${dir}`);
-        throw err;
-    }
-}
-exports.findRepoRoot = findRepoRoot;
-/**
- * Returns the git diff old/new mode, status, and path. Given a git diff.
- * Errors if there is a parsing error
- * @param {string} gitDiffPattern A single file diff. Renames and copies are broken up into separate diffs. See https://git-scm.com/docs/git-diff#Documentation/git-diff.txt-git-diff-filesltpatterngt82308203 for more details
- * @returns indexable git diff fields: old/new mode, status, and path
- */
-function parseGitDiff(gitDiffPattern) {
-    try {
-        const fields = gitDiffPattern.split(' ');
-        const newMode = fields[1];
-        const oldMode = fields[0].substring(1);
-        const statusAndPath = fields[4].split('\t');
-        const status = statusAndPath[0];
-        const relativePath = statusAndPath[1];
-        return { oldMode, newMode, status, relativePath };
-    }
-    catch (err) {
-        logger_1.logger.warn(`\`git diff --raw\` may have changed formats: \n ${gitDiffPattern}`);
-        throw err;
-    }
-}
-/**
- * Get the GitHub mode, file content, and relative path asynchronously
- * Rejects if there is a git diff error, or if the file contents could not be loaded.
- * @param {string} gitRootDir the root of the local GitHub repository
- * @param {string} gitDiffPattern A single file diff. Renames and copies are broken up into separate diffs. See https://git-scm.com/docs/git-diff#Documentation/git-diff.txt-git-diff-filesltpatterngt82308203 for more details
- * @returns {Promise<GitFileData>} the current mode, the relative path of the file in the Git Repository, and the file status.
- */
-function getGitFileData(gitRootDir, gitDiffPattern) {
-    return new Promise((resolve, reject) => {
-        try {
-            const { oldMode, newMode, status, relativePath } = parseGitDiff(gitDiffPattern);
-            // if file is deleted, do not attempt to read it
-            if (status === 'D') {
-                resolve({ path: relativePath, fileData: new types_1.FileData(null, oldMode) });
-            }
-            else {
-                // else read the file
-                (0, fs_1.readFile)(gitRootDir + '/' + relativePath, {
-                    encoding: 'utf-8',
-                }, (err, content) => {
-                    if (err) {
-                        logger_1.logger.error(`Error loading file ${relativePath} in git directory ${gitRootDir}`);
-                        reject(err);
-                    }
-                    resolve({
-                        path: relativePath,
-                        fileData: new types_1.FileData(content, newMode),
-                    });
-                });
-            }
-        }
-        catch (err) {
-            reject(err);
-        }
-    });
-}
-exports.getGitFileData = getGitFileData;
-/**
- * Get all the diffs using `git diff` of a git directory.
- * Errors if the git directory provided is not a git directory.
- * @param {string} gitRootDir a git directory
- * @returns {string[]} a list of git diffs
- */
-function getAllDiffs(gitRootDir) {
-    (0, child_process_1.execSync)('git add -A', { cwd: gitRootDir });
-    const diffs = (0, child_process_1.execSync)('git diff --raw --staged --no-renames', {
-        cwd: gitRootDir,
-    })
-        .toString() // strictly return buffer for mocking purposes. sinon ts doesn't infer {encoding: 'utf-8'}
-        .trimRight() // remove the trailing new line
-        .split('\n')
-        .filter(line => !!line.trim());
-    (0, child_process_1.execSync)('git reset .', { cwd: gitRootDir });
-    return diffs;
-}
-exports.getAllDiffs = getAllDiffs;
-/**
- * Get the git changes of the current project asynchronously.
- * Rejects if any of the files fails to load (if not deleted),
- * or if there is a git diff parse error
- * @param {string[]} diffs the git diff raw output (which only shows relative paths)
- * @param {string} gitDir the root of the local GitHub repository
- * @returns {Promise<Changes>} the changeset
- */
-async function parseChanges(diffs, gitDir) {
-    try {
-        // get updated file contents
-        const changes = new Map();
-        const changePromises = [];
-        for (let i = 0; i < diffs.length; i++) {
-            // TODO - handle memory constraint
-            changePromises.push(getGitFileData(gitDir, diffs[i]));
-        }
-        const gitFileDatas = await Promise.all(changePromises);
-        for (let i = 0; i < gitFileDatas.length; i++) {
-            changes.set(gitFileDatas[i].path, gitFileDatas[i].fileData);
-        }
-        return changes;
-    }
-    catch (err) {
-        logger_1.logger.error('Error parsing git changes');
-        throw err;
-    }
-}
-exports.parseChanges = parseChanges;
-/**
- * Throws an error if git is not installed
- * @returns {void} void if git is installed
- */
-function validateGitInstalled() {
-    try {
-        (0, child_process_1.execSync)('git --version');
-    }
-    catch (err) {
-        logger_1.logger.error('git not installed');
-        throw new InstallationError('git command is not recognized. Make sure git is installed.');
-    }
-}
-/**
- * Load the change set asynchronously.
- * @param dir the directory containing git changes
- * @returns {Promise<Changes>} the change set
- */
-function getChanges(dir) {
-    try {
-        validateGitInstalled();
-        const absoluteDir = resolvePath(dir);
-        const gitRootDir = findRepoRoot(absoluteDir);
-        const diffs = getAllDiffs(gitRootDir);
-        return parseChanges(diffs, gitRootDir);
-    }
-    catch (err) {
-        if (!(err instanceof InstallationError)) {
-            logger_1.logger.error('Error loadng git changes.');
-        }
-        throw err;
-    }
-}
-exports.getChanges = getChanges;
-/**
- * Get the git changes of the current project asynchronously.
- * Rejects if any of the files fails to load (if not deleted),
- * or if there is a git diff parse error
- * @param {string[]} diffs the git diff raw output (which only shows relative paths)
- * @param {string} gitDir the root of the local GitHub repository
- * @returns {string} the diff
- */
-function getDiffString(dir) {
-    try {
-        validateGitInstalled();
-        const absoluteDir = resolvePath(dir);
-        const gitRootDir = findRepoRoot(absoluteDir);
-        (0, child_process_1.execSync)('git add -A', { cwd: gitRootDir });
-        const diff = (0, child_process_1.execSync)('git diff --staged --no-renames', {
-            cwd: gitRootDir,
-        })
-            .toString() // strictly return buffer for mocking purposes. sinon ts doesn't infer {encoding: 'utf-8'}
-            .trimRight(); // remove the trailing new line
-        (0, child_process_1.execSync)('git reset .', { cwd: gitRootDir });
-        return diff;
-    }
-    catch (err) {
-        if (!(err instanceof InstallationError)) {
-            logger_1.logger.error('Error loadng git changes.');
-        }
-        throw err;
-    }
-}
-exports.getDiffString = getDiffString;
-//# sourceMappingURL=handle-git-dir-change.js.map
-
-/***/ }),
-
-/***/ 9558:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.addReviewCommentsDefaults = exports.addPullRequestDefaults = void 0;
-const DEFAULT_BRANCH_NAME = 'code-suggestions';
-const DEFAULT_PRIMARY_BRANCH = 'main';
-const DEFAULT_PAGE_SIZE = 100;
-/**
- * Add defaults to GitHub Pull Request options.
- * Preserves the empty string.
- * For ESCMAScript, null/undefined values are preserved for required fields.
- * Recommended with an object validation function to check empty strings and incorrect types.
- * @param {PullRequestUserOptions} options the user-provided github pull request options
- * @returns {CreatePullRequest} git hub context with defaults applied
- */
-function addPullRequestDefaults(options) {
-    const pullRequestSettings = {
-        upstreamOwner: options.upstreamOwner,
-        upstreamRepo: options.upstreamRepo,
-        description: options.description,
-        title: options.title,
-        message: options.message,
-        force: options.force || false,
-        branch: typeof options.branch === 'string' ? options.branch : DEFAULT_BRANCH_NAME,
-        primary: typeof options.primary === 'string'
-            ? options.primary
-            : DEFAULT_PRIMARY_BRANCH,
-        maintainersCanModify: options.maintainersCanModify === false ? false : true,
-        filesPerCommit: options.filesPerCommit,
-    };
-    return pullRequestSettings;
-}
-exports.addPullRequestDefaults = addPullRequestDefaults;
-/**
- * Format user input for pull request review comments
- * @param options The user's options input for review comments
- * @returns the formatted version of user input for pull request review comments
- */
-function addReviewCommentsDefaults(options) {
-    const createReviewComment = {
-        repo: options.repo,
-        owner: options.owner,
-        pullNumber: options.pullNumber,
-        // if zero set as 0
-        pageSize: options.pageSize === null || options.pageSize === undefined
-            ? DEFAULT_PAGE_SIZE
-            : options.pageSize,
-    };
-    return createReviewComment;
-}
-exports.addReviewCommentsDefaults = addReviewCommentsDefaults;
-//# sourceMappingURL=default-options-handler.js.map
-
-/***/ }),
-
-/***/ 15313:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright 2023 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.CommitError = void 0;
-class CommitError extends Error {
-    constructor(message, cause) {
-        super(message);
-        this.cause = cause;
-    }
-}
-exports.CommitError = CommitError;
-//# sourceMappingURL=errors.js.map
-
-/***/ }),
-
-/***/ 58021:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.branch = exports.createBranch = exports.existsBranchWithName = exports.getBranchHead = exports.createRef = void 0;
-const logger_1 = __nccwpck_require__(58192);
-const REF_PREFIX = 'refs/heads/';
-const DEFAULT_PRIMARY_BRANCH = 'main';
-/**
- * Create a new branch reference with the ref prefix
- * @param {string} branchName name of the branch
- */
-function createRef(branchName) {
-    return REF_PREFIX + branchName;
-}
-exports.createRef = createRef;
-/**
- * get branch commit HEAD SHA of a repository
- * Throws an error if the branch cannot be found
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} origin The domain information of the remote origin repository
- * @param {string} branch the name of the branch
- * @returns {Promise<string>} branch commit HEAD SHA
- */
-async function getBranchHead(octokit, origin, branch) {
-    const branchData = (await octokit.repos.getBranch({
-        owner: origin.owner,
-        repo: origin.repo,
-        branch,
-    })).data;
-    logger_1.logger.info(`Successfully found branch HEAD sha "${branchData.commit.sha}".`);
-    return branchData.commit.sha;
-}
-exports.getBranchHead = getBranchHead;
-/**
- * Determine if there is a branch with the provided name in the remote GitHub repository
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} remote The domain information of the remote repository
- * @param {string} name The branch name to create on the repository
- * @returns {Promise<boolean>} if there is a branch already existing in the remote GitHub repository
- */
-async function existsBranchWithName(octokit, remote, name) {
-    try {
-        const data = (await octokit.git.getRef({
-            owner: remote.owner,
-            repo: remote.repo,
-            ref: `heads/${name}`,
-        })).data;
-        return data.ref ? true : false;
-    }
-    catch (err) {
-        if (err.status === 404)
-            return false;
-        else
-            throw err;
-    }
-}
-exports.existsBranchWithName = existsBranchWithName;
-/**
- * Create a branch on the remote repository if there is not an existing branch
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} remote The domain information of the remote origin repository
- * @param {string} name The branch name to create on the origin repository
- * @param {string} baseSha the sha that the base of the reference points to
- * @param {boolean} duplicate whether there is an existing branch or not
- * @returns {Promise<void>}
- */
-async function createBranch(octokit, remote, name, baseSha, duplicate) {
-    if (!duplicate) {
-        const refData = (await octokit.git.createRef({
-            owner: remote.owner,
-            repo: remote.repo,
-            ref: createRef(name),
-            sha: baseSha,
-        })).data;
-        logger_1.logger.info(`Successfully created branch at ${refData.url}`);
-    }
-    else {
-        logger_1.logger.info('Skipping branch creation step...');
-    }
-}
-exports.createBranch = createBranch;
-/**
- * Create a GitHub branch given a remote origin.
- * Throws an exception if octokit fails, or if the base branch is invalid
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} origin The domain information of the remote origin repository
- * @param {RepoDomain} upstream The domain information of the remote upstream repository
- * @param {string} name The branch name to create on the origin repository
- * @param {string} baseBranch the name of the branch to base the new branch off of. Default is main
- * @returns {Promise<string>} the base SHA for subsequent commits to be based off for the origin branch
- */
-async function branch(octokit, origin, upstream, name, baseBranch = DEFAULT_PRIMARY_BRANCH) {
-    // create branch from primary branch HEAD SHA
-    try {
-        const baseSha = await getBranchHead(octokit, upstream, baseBranch);
-        const duplicate = await existsBranchWithName(octokit, origin, name);
-        await createBranch(octokit, origin, name, baseSha, duplicate);
-        return baseSha;
-    }
-    catch (err) {
-        logger_1.logger.error('Error when creating branch');
-        throw err;
-    }
-}
-exports.branch = branch;
-//# sourceMappingURL=branch.js.map
-
-/***/ }),
-
-/***/ 4424:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.commitAndPush = exports.updateRef = exports.createTree = exports.generateTreeObjects = void 0;
-const logger_1 = __nccwpck_require__(58192);
-const create_commit_1 = __nccwpck_require__(93018);
-const errors_1 = __nccwpck_require__(15313);
-const DEFAULT_FILES_PER_COMMIT = 100;
-/**
- * Generate and return a GitHub tree object structure
- * containing the target change data
- * See https://developer.github.com/v3/git/trees/#tree-object
- * @param {Changes} changes the set of repository changes
- * @returns {TreeObject[]} The new GitHub changes
- */
-function generateTreeObjects(changes) {
-    const tree = [];
-    changes.forEach((fileData, path) => {
-        if (fileData.content === null) {
-            // if no file content then file is deleted
-            tree.push({
-                path,
-                mode: fileData.mode,
-                type: 'blob',
-                sha: null,
-            });
-        }
-        else {
-            // update file with its content
-            tree.push({
-                path,
-                mode: fileData.mode,
-                type: 'blob',
-                content: fileData.content,
-            });
-        }
-    });
-    return tree;
-}
-exports.generateTreeObjects = generateTreeObjects;
-function* inGroupsOf(all, groupSize) {
-    for (let i = 0; i < all.length; i += groupSize) {
-        yield all.slice(i, i + groupSize);
-    }
-}
-/**
- * Upload and create a remote GitHub tree
- * and resolves with the new tree SHA.
- * Rejects if GitHub V3 API fails with the GitHub error response
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} origin the the remote repository to push changes to
- * @param {string} refHead the base of the new commit(s)
- * @param {TreeObject[]} tree the set of GitHub changes to upload
- * @returns {Promise<string>} the GitHub tree SHA
- * @throws {CommitError}
- */
-async function createTree(octokit, origin, refHead, tree) {
-    const oldTreeSha = (await octokit.git.getCommit({
-        owner: origin.owner,
-        repo: origin.repo,
-        commit_sha: refHead,
-    })).data.tree.sha;
-    logger_1.logger.info('Got the latest commit tree');
-    try {
-        const treeSha = (await octokit.git.createTree({
-            owner: origin.owner,
-            repo: origin.repo,
-            tree,
-            base_tree: oldTreeSha,
-        })).data.sha;
-        logger_1.logger.info(`Successfully created a tree with the desired changes with SHA ${treeSha}`);
-        return treeSha;
-    }
-    catch (e) {
-        throw new errors_1.CommitError(`Error adding to tree: ${refHead}`, e);
-    }
-}
-exports.createTree = createTree;
-/**
- * Update a reference to a SHA
- * Rejects if GitHub V3 API fails with the GitHub error response
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {BranchDomain} origin the the remote branch to push changes to
- * @param {string} newSha the ref to update the commit HEAD to
- * @param {boolean} force to force the commit changes given refHead
- * @returns {Promise<void>}
- */
-async function updateRef(octokit, origin, newSha, force) {
-    logger_1.logger.info(`Updating reference heads/${origin.branch} to ${newSha}`);
-    try {
-        await octokit.git.updateRef({
-            owner: origin.owner,
-            repo: origin.repo,
-            ref: `heads/${origin.branch}`,
-            sha: newSha,
-            force,
-        });
-        logger_1.logger.info(`Successfully updated reference ${origin.branch} to ${newSha}`);
-    }
-    catch (e) {
-        throw new errors_1.CommitError(`Error updating ref heads/${origin.branch} to ${newSha}`, e);
-    }
-}
-exports.updateRef = updateRef;
-/**
- * Given a set of changes, apply the commit(s) on top of the given branch's head and upload it to GitHub
- * Rejects if GitHub V3 API fails with the GitHub error response
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {string} refHead the base of the new commit(s)
- * @param {Changes} changes the set of repository changes
- * @param {RepoDomain} origin the the remote repository to push changes to
- * @param {string} originBranchName the remote branch that will contain the new changes
- * @param {string} commitMessage the message of the new commit
- * @param {boolean} force to force the commit changes given refHead
- * @returns {Promise<void>}
- * @throws {CommitError}
- */
-async function commitAndPush(octokit, refHead, changes, originBranch, commitMessage, force, options) {
-    var _a;
-    const filesPerCommit = (_a = options === null || options === void 0 ? void 0 : options.filesPerCommit) !== null && _a !== void 0 ? _a : DEFAULT_FILES_PER_COMMIT;
-    const tree = generateTreeObjects(changes);
-    for (const treeGroup of inGroupsOf(tree, filesPerCommit)) {
-        const treeSha = await createTree(octokit, originBranch, refHead, treeGroup);
-        refHead = await (0, create_commit_1.createCommit)(octokit, originBranch, refHead, treeSha, commitMessage, options);
-    }
-    await updateRef(octokit, originBranch, refHead, force);
-}
-exports.commitAndPush = commitAndPush;
-//# sourceMappingURL=commit-and-push.js.map
-
-/***/ }),
-
-/***/ 93018:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2022 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.createCommit = void 0;
-const logger_1 = __nccwpck_require__(58192);
-const errors_1 = __nccwpck_require__(15313);
-/**
- * Create a commit with a repo snapshot SHA on top of the reference HEAD
- * and resolves with the SHA of the commit.
- * Rejects if GitHub V3 API fails with the GitHub error response
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} origin the the remote repository to push changes to
- * @param {string} refHead the base of the new commit(s)
- * @param {string} treeSha the tree SHA that this commit will point to
- * @param {string} message the message of the new commit
- * @returns {Promise<string>} the new commit SHA
- * @see https://docs.github.com/en/rest/git/commits?apiVersion=2022-11-28#create-a-commit
- */
-async function createCommit(octokit, origin, refHead, treeSha, message, options = {}) {
-    try {
-        const signature = options.signer
-            ? await options.signer.generateSignature({
-                message,
-                tree: treeSha,
-                parents: [refHead],
-                author: options.author,
-                committer: options.committer,
-            })
-            : undefined;
-        const { data: { sha, url }, } = await octokit.git.createCommit({
-            owner: origin.owner,
-            repo: origin.repo,
-            message,
-            tree: treeSha,
-            parents: [refHead],
-            signature,
-            author: options.author,
-            committer: options.committer,
-        });
-        logger_1.logger.info(`Successfully created commit. See commit at ${url}`);
-        return sha;
-    }
-    catch (e) {
-        throw new errors_1.CommitError(`Error creating commit for: ${treeSha}`, e);
-    }
-}
-exports.createCommit = createCommit;
-//# sourceMappingURL=create-commit.js.map
-
-/***/ }),
-
-/***/ 67386:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.fork = void 0;
-const logger_1 = __nccwpck_require__(58192);
-/**
- * Fork the GitHub owner's repository.
- * Returns the fork owner and fork repo when the fork creation request to GitHub succeeds.
- * Otherwise throws error.
- *
- * If fork already exists no new fork is created, no error occurs, and the existing Fork data is returned
- * with the `updated_at` + any historical repo changes.
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} upstream upstream repository information
- * @returns {Promise<RepoDomain>} the forked repository name, as well as the owner of that fork
- */
-async function fork(octokit, upstream) {
-    try {
-        const forkedRepo = (await octokit.repos.createFork({
-            owner: upstream.owner,
-            repo: upstream.repo,
-        })).data;
-        const origin = {
-            repo: forkedRepo.name,
-            owner: forkedRepo.owner.login,
-        };
-        logger_1.logger.info(`Create fork request was successful for ${origin.owner}/${origin.repo}`);
-        return origin;
-    }
-    catch (err) {
-        logger_1.logger.error('Error when forking');
-        throw err;
-    }
-}
-exports.fork = fork;
-//# sourceMappingURL=fork.js.map
-
-/***/ }),
-
-/***/ 8831:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2021 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.addLabels = void 0;
-const logger_1 = __nccwpck_require__(58192);
-/**
- * Create a GitHub PR on the upstream organization's repo
- * Throws an error if the GitHub API fails
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} upstream The upstream repository
- * @param {BranchDomain} origin The remote origin information that contains the origin branch
- * @param {number} issue_number The issue number to add labels to. Can also be a PR number
- * @param {string[]} labels The list of labels to apply to the issue/pull request. Default is []. the funciton will no-op.
- * @returns {Promise<string[]>} The list of resulting labels after the addition of the given labels
- */
-async function addLabels(octokit, upstream, origin, issue_number, labels) {
-    if (!labels || labels.length === 0) {
-        return [];
-    }
-    const labelsResponseData = (await octokit.issues.addLabels({
-        owner: upstream.owner,
-        repo: origin.repo,
-        issue_number: issue_number,
-        labels: labels,
-    })).data;
-    logger_1.logger.info(`Successfully added labels ${labels} to issue: ${issue_number}`);
-    return labelsResponseData.map(l => l.name);
-}
-exports.addLabels = addLabels;
-//# sourceMappingURL=labels.js.map
-
-/***/ }),
-
-/***/ 24461:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.openPullRequest = void 0;
-const logger_1 = __nccwpck_require__(58192);
-const DEFAULT_PRIMARY = 'main';
-/**
- * Create a GitHub PR on the upstream organization's repo
- * Throws an error if the GitHub API fails
- * @param {Octokit} octokit The authenticated octokit instance
- * @param {RepoDomain} upstream The upstream repository
- * @param {BranchDomain} origin The remote origin information that contains the origin branch
- * @param {Description} description The pull request title and detailed description
- * @param {boolean} maintainersCanModify Whether or not maintainers can modify the pull request. Default is true
- * @param {string} upstreamPrimary The upstream repository's primary branch. Default is main.
- * @param draft Open a DRAFT pull request.  Defaults to false.
- * @returns {Promise<void>}
- */
-async function openPullRequest(octokit, upstream, origin, description, maintainersCanModify = true, upstreamPrimary = DEFAULT_PRIMARY, draft = false) {
-    const head = `${origin.owner}:${origin.branch}`;
-    const existingPullRequest = (await octokit.pulls.list({
-        owner: upstream.owner,
-        repo: origin.repo,
-        head,
-    })).data.find(pr => pr.head.label === head);
-    if (existingPullRequest) {
-        logger_1.logger.info(`Found existing pull request for reference ${origin.owner}:${origin.branch}. Skipping creating a new pull request.`);
-        return existingPullRequest.number;
-    }
-    const pullResponseData = (await octokit.pulls.create({
-        owner: upstream.owner,
-        repo: origin.repo,
-        title: description.title,
-        head: `${origin.owner}:${origin.branch}`,
-        base: upstreamPrimary,
-        body: description.body,
-        maintainer_can_modify: maintainersCanModify,
-        draft: draft,
-    })).data;
-    logger_1.logger.info(`Successfully opened pull request available at url: ${pullResponseData.url}.`);
-    return pullResponseData.number;
-}
-exports.openPullRequest = openPullRequest;
-//# sourceMappingURL=open-pull-request.js.map
-
-/***/ }),
-
-/***/ 43102:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getPullRequestHunks = exports.getCurrentPullRequestPatches = exports.createPullRequestReview = exports.makeInlineSuggestions = exports.buildReviewComments = exports.buildSummaryComment = void 0;
-const logger_1 = __nccwpck_require__(58192);
-const diff_utils_1 = __nccwpck_require__(15276);
-const hunk_utils_1 = __nccwpck_require__(26381);
-function hunkErrorMessage(hunk) {
-    return `  * lines ${hunk.oldStart}-${hunk.oldEnd}`;
-}
-function fileErrorMessage(filename, hunks) {
-    return `* ${filename}\n` + hunks.map(hunkErrorMessage).join('\n');
-}
-/**
- * Build an error message based on invalid hunks.
- * Returns an empty string if the provided hunks are empty.
- * @param invalidHunks a map of filename to hunks that are not suggestable
- */
-function buildSummaryComment(invalidHunks) {
-    if (invalidHunks.size === 0) {
-        return '';
-    }
-    return ('Some suggestions could not be made:\n' +
-        Array.from(invalidHunks, ([filename, hunks]) => fileErrorMessage(filename, hunks)).join('\n'));
-}
-exports.buildSummaryComment = buildSummaryComment;
-const COMFORT_PREVIEW_HEADER = 'application/vnd.github.comfort-fade-preview+json';
-/**
- * Convert the patch suggestions into GitHub parameter objects.
- * Use this to generate review comments
- * For information see:
- * https://developer.github.com/v3/pulls/comments/#create-a-review-comment-for-a-pull-request
- * @param suggestions
- */
-function buildReviewComments(suggestions) {
-    const fileComments = [];
-    suggestions.forEach((hunks, fileName) => {
-        hunks.forEach(hunk => {
-            const newContent = hunk.newContent.join('\n');
-            if (hunk.oldStart === hunk.oldEnd) {
-                const singleComment = {
-                    path: fileName,
-                    body: `\`\`\`suggestion\n${newContent}\n\`\`\``,
-                    line: hunk.oldEnd,
-                    side: 'RIGHT',
-                };
-                fileComments.push(singleComment);
-            }
-            else {
-                const comment = {
-                    path: fileName,
-                    body: `\`\`\`suggestion\n${newContent}\n\`\`\``,
-                    start_line: hunk.oldStart,
-                    line: hunk.oldEnd,
-                    side: 'RIGHT',
-                    start_side: 'RIGHT',
-                };
-                fileComments.push(comment);
-            }
-        });
-    });
-    return fileComments;
-}
-exports.buildReviewComments = buildReviewComments;
-/**
- * Make a request to GitHub to make review comments
- * @param octokit an authenticated octokit instance
- * @param suggestions code suggestions patches
- * @param remote the repository domain
- * @param pullNumber the pull request number to make a review on
- */
-async function makeInlineSuggestions(octokit, suggestions, outOfScopeSuggestions, remote, pullNumber) {
-    const comments = buildReviewComments(suggestions);
-    if (!comments.length) {
-        logger_1.logger.info('No valid suggestions to make');
-    }
-    if (!comments.length && !outOfScopeSuggestions.size) {
-        logger_1.logger.info('No suggestions were generated. Exiting...');
-        return null;
-    }
-    const summaryComment = buildSummaryComment(outOfScopeSuggestions);
-    if (summaryComment) {
-        logger_1.logger.warn('Some suggestions could not be made');
-    }
-    // apply the suggestions to the latest sha
-    // the latest Pull Request hunk range includes
-    // all previous commit valid hunk ranges
-    const headSha = (await octokit.pulls.get({
-        owner: remote.owner,
-        repo: remote.repo,
-        pull_number: pullNumber,
-    })).data.head.sha;
-    const reviewNumber = (await octokit.pulls.createReview({
-        owner: remote.owner,
-        repo: remote.repo,
-        pull_number: pullNumber,
-        commit_id: headSha,
-        event: 'COMMENT',
-        body: summaryComment,
-        headers: { accept: COMFORT_PREVIEW_HEADER },
-        // Octokit type definitions doesn't support mulitiline comments, but the GitHub API does
-        comments: comments,
-    })).data.id;
-    logger_1.logger.info(`Successfully created a review on pull request: ${pullNumber}.`);
-    return reviewNumber;
-}
-exports.makeInlineSuggestions = makeInlineSuggestions;
-/**
- * Comment on a Pull Request
- * @param {Octokit} octokit authenticated octokit isntance
- * @param {RepoDomain} remote the Pull Request repository
- * @param {number} pullNumber the Pull Request number
- * @param {number} pageSize the number of files to comment on // TODO pagination
- * @param {Map<string, FileDiffContent>} diffContents the old and new contents of the files to suggest
- * @returns the created review's id, or null if no review was made
- */
-async function createPullRequestReview(octokit, remote, pullNumber, pageSize, diffContents) {
-    try {
-        // get the hunks from the pull request
-        const pullRequestHunks = await exports.getPullRequestHunks(octokit, remote, pullNumber, pageSize);
-        // get the hunks from the suggested change
-        const allSuggestedHunks = typeof diffContents === 'string'
-            ? (0, diff_utils_1.parseAllHunks)(diffContents)
-            : (0, hunk_utils_1.getRawSuggestionHunks)(diffContents);
-        // split hunks by commentable and uncommentable
-        const { validHunks, invalidHunks } = (0, hunk_utils_1.partitionSuggestedHunksByScope)(pullRequestHunks, allSuggestedHunks);
-        // create pull request review
-        const reviewNumber = await exports.makeInlineSuggestions(octokit, validHunks, invalidHunks, remote, pullNumber);
-        return reviewNumber;
-    }
-    catch (err) {
-        logger_1.logger.error('Failed to suggest');
-        throw err;
-    }
-}
-exports.createPullRequestReview = createPullRequestReview;
-/**
- * For a pull request, get each remote file's patch text asynchronously
- * Also get the list of files whose patch data could not be returned
- * @param {Octokit} octokit the authenticated octokit instance
- * @param {RepoDomain} remote the remote repository domain information
- * @param {number} pullNumber the pull request number
- * @param {number} pageSize the number of results to return per page
- * @returns {Promise<Object<PatchText, string[]>>} the stringified patch data for each file and the list of files whose patch data could not be resolved
- */
-async function getCurrentPullRequestPatches(octokit, remote, pullNumber, pageSize) {
-    // TODO: support pagination
-    const filesMissingPatch = [];
-    const files = (await octokit.pulls.listFiles({
-        owner: remote.owner,
-        repo: remote.repo,
-        pull_number: pullNumber,
-        per_page: pageSize,
-    })).data;
-    const patches = new Map();
-    if (files.length === 0) {
-        logger_1.logger.error(`0 file results have returned from list files query for Pull Request #${pullNumber}. Cannot make suggestions on an empty Pull Request`);
-        throw Error('Empty Pull Request');
-    }
-    files.forEach(file => {
-        if (file.patch === undefined) {
-            // files whose patch is too large do not return the patch text by default
-            // TODO handle file patches that are too large
-            logger_1.logger.warn(`File ${file.filename} may have a patch that is too large to display patch object.`);
-            filesMissingPatch.push(file.filename);
-        }
-        else {
-            patches.set(file.filename, file.patch);
-        }
-    });
-    if (patches.size === 0) {
-        logger_1.logger.warn('0 patches have been returned. This could be because the patch results were too large to return.');
-    }
-    return { patches, filesMissingPatch };
-}
-exports.getCurrentPullRequestPatches = getCurrentPullRequestPatches;
-/**
- * For a pull request, get each remote file's current patch range to identify the scope of each patch as a Map.
- * @param {Octokit} octokit the authenticated octokit instance
- * @param {RepoDomain} remote the remote repository domain information
- * @param {number} pullNumber the pull request number
- * @param {number} pageSize the number of files to return per pull request list files query
- * @returns {Promise<Map<string, Hunk[]>>} the scope of each file in the pull request
- */
-async function getPullRequestHunks(octokit, remote, pullNumber, pageSize) {
-    const files = (await octokit.pulls.listFiles({
-        owner: remote.owner,
-        repo: remote.repo,
-        pull_number: pullNumber,
-        per_page: pageSize,
-    })).data;
-    const pullRequestHunks = new Map();
-    if (files.length === 0) {
-        logger_1.logger.error(`0 file results have returned from list files query for Pull Request #${pullNumber}. Cannot make suggestions on an empty Pull Request`);
-        throw Error('Empty Pull Request');
-    }
-    files.forEach(file => {
-        if (file.patch === undefined) {
-            // files whose patch is too large do not return the patch text by default
-            // TODO handle file patches that are too large
-            logger_1.logger.warn(`File ${file.filename} may have a patch that is too large to display patch object.`);
-        }
-        else {
-            const hunks = (0, diff_utils_1.parsePatch)(file.patch);
-            pullRequestHunks.set(file.filename, hunks);
-        }
-    });
-    if (pullRequestHunks.size === 0) {
-        logger_1.logger.warn('0 patches have been returned. This could be because the patch results were too large to return.');
-    }
-    return pullRequestHunks;
-}
-exports.getPullRequestHunks = getPullRequestHunks;
-//# sourceMappingURL=review-pull-request.js.map
-
-/***/ }),
-
-/***/ 77103:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.parseTextFiles = exports.createPullRequest = exports.reviewPullRequest = exports.CommitError = exports.getDiffString = exports.getChanges = void 0;
-const types_1 = __nccwpck_require__(13984);
-const logger_1 = __nccwpck_require__(58192);
-const default_options_handler_1 = __nccwpck_require__(9558);
-const retry = __nccwpck_require__(33415);
-const review_pull_request_1 = __nccwpck_require__(43102);
-const branch_1 = __nccwpck_require__(58021);
-const fork_1 = __nccwpck_require__(67386);
-const commit_and_push_1 = __nccwpck_require__(4424);
-const open_pull_request_1 = __nccwpck_require__(24461);
-const labels_1 = __nccwpck_require__(8831);
-var handle_git_dir_change_1 = __nccwpck_require__(49988);
-Object.defineProperty(exports, "getChanges", ({ enumerable: true, get: function () { return handle_git_dir_change_1.getChanges; } }));
-Object.defineProperty(exports, "getDiffString", ({ enumerable: true, get: function () { return handle_git_dir_change_1.getDiffString; } }));
-var errors_1 = __nccwpck_require__(15313);
-Object.defineProperty(exports, "CommitError", ({ enumerable: true, get: function () { return errors_1.CommitError; } }));
-/**
- * Given a set of suggestions, make all the multiline inline review comments on a given pull request given
- * that they are in scope of the pull request. Outof scope suggestions are not made.
- *
- * In-scope suggestions are specifically: the suggestion for a file must correspond to a file in the remote pull request
- * and the diff hunk computed for a file's contents must produce a range that is a subset of the pull request's files hunks.
- *
- * If a file is too large to load in the review, it is skipped in the suggestion phase.
- *
- * If changes are empty then the workflow will not run.
- * Rethrows an HttpError if Octokit GitHub API returns an error. HttpError Octokit access_token and client_secret headers redact all sensitive information.
- * @param octokit The authenticated octokit instance, instantiated with an access token having permissiong to create a fork on the target repository.
- * @param diffContents A set of changes. The changes may be empty.
- * @param options The configuration for interacting with GitHub provided by the user.
- * @returns the created review's id number, or null if there are no changes to be made.
- */
-async function reviewPullRequest(octokit, diffContents, options) {
-    (0, logger_1.setupLogger)(options.logger);
-    // if null undefined, or the empty map then no changes have been provided.
-    // Do not execute GitHub workflow
-    if (diffContents === null ||
-        diffContents === undefined ||
-        (typeof diffContents !== 'string' && diffContents.size === 0)) {
-        logger_1.logger.info('Empty changes provided. No suggestions to be made. Cancelling workflow.');
-        return null;
-    }
-    const gitHubConfigs = (0, default_options_handler_1.addReviewCommentsDefaults)(options);
-    const remote = {
-        owner: gitHubConfigs.owner,
-        repo: gitHubConfigs.repo,
-    };
-    const reviewNumber = await (0, review_pull_request_1.createPullRequestReview)(octokit, remote, gitHubConfigs.pullNumber, gitHubConfigs.pageSize, diffContents);
-    return reviewNumber;
-}
-exports.reviewPullRequest = reviewPullRequest;
-/**
- * Make a new GitHub Pull Request with a set of changes applied on top of primary branch HEAD.
- * The changes are committed into a new branch based on the upstream repository options using the authenticated Octokit account.
- * Then a Pull Request is made from that branch.
- *
- * Also throws error if git data from the fork is not ready in 5 minutes.
- *
- * From the docs
- * https://developer.github.com/v3/repos/forks/#create-a-fork
- * """
- * Forking a Repository happens asynchronously.
- * You may have to wait a short period of time before you can access the git objects.
- * If this takes longer than 5 minutes, be sure to contact GitHub Support or GitHub Premium Support.
- * """
- *
- * If changes are empty then the workflow will not run.
- * Rethrows an HttpError if Octokit GitHub API returns an error. HttpError Octokit access_token and client_secret headers redact all sensitive information.
- * @param {Octokit} octokit The authenticated octokit instance, instantiated with an access token having permissiong to create a fork on the target repository
- * @param {Changes | null | undefined} changes A set of changes. The changes may be empty
- * @param {CreatePullRequestUserOptions} options The configuration for interacting with GitHub provided by the user.
- * @returns {Promise<number>} the pull request number. Returns 0 if unsuccessful.
- * @throws {CommitError} on failure during commit process
- */
-async function createPullRequest(octokit, changes, options) {
-    (0, logger_1.setupLogger)(options.logger);
-    // if null undefined, or the empty map then no changes have been provided.
-    // Do not execute GitHub workflow
-    if (changes === null || changes === undefined || changes.size === 0) {
-        logger_1.logger.info('Empty change set provided. No changes need to be made. Cancelling workflow.');
-        return 0;
-    }
-    const gitHubConfigs = (0, default_options_handler_1.addPullRequestDefaults)(options);
-    logger_1.logger.info('Starting GitHub PR workflow...');
-    const upstream = {
-        owner: gitHubConfigs.upstreamOwner,
-        repo: gitHubConfigs.upstreamRepo,
-    };
-    const origin = options.fork === false ? upstream : await (0, fork_1.fork)(octokit, upstream);
-    if (options.fork) {
-        // try to sync the fork
-        await retry(async () => await octokit.repos.mergeUpstream({
-            owner: origin.owner,
-            repo: origin.repo,
-            branch: gitHubConfigs.primary,
-        }), {
-            retries: options.retry,
-            factor: 2.8411,
-            minTimeout: 3000,
-            randomize: false,
-            onRetry: (e, attempt) => {
-                e.message = `Error creating syncing upstream: ${e.message}`;
-                logger_1.logger.error(e);
-                logger_1.logger.info(`Retry attempt #${attempt}...`);
-            },
-        });
-    }
-    const originBranch = {
-        ...origin,
-        branch: gitHubConfigs.branch,
-    };
-    // The `retry` flag defaults to `5` to maintain compatibility
-    options.retry = options.retry === undefined ? 5 : options.retry;
-    const refHeadSha = await retry(async () => await (0, branch_1.branch)(octokit, origin, upstream, originBranch.branch, gitHubConfigs.primary), {
-        retries: options.retry,
-        factor: 2.8411,
-        minTimeout: 3000,
-        randomize: false,
-        onRetry: (e, attempt) => {
-            e.message = `Error creating Pull Request: ${e.message}`;
-            logger_1.logger.error(e);
-            logger_1.logger.info(`Retry attempt #${attempt}...`);
-        },
-    });
-    await (0, commit_and_push_1.commitAndPush)(octokit, refHeadSha, changes, originBranch, gitHubConfigs.message, gitHubConfigs.force, options);
-    const description = {
-        body: gitHubConfigs.description,
-        title: gitHubConfigs.title,
-    };
-    const prNumber = await (0, open_pull_request_1.openPullRequest)(octokit, upstream, originBranch, description, gitHubConfigs.maintainersCanModify, gitHubConfigs.primary, options.draft);
-    logger_1.logger.info(`Successfully opened pull request: ${prNumber}.`);
-    // addLabels will no-op if options.labels is undefined or empty.
-    await (0, labels_1.addLabels)(octokit, upstream, originBranch, prNumber, options.labels);
-    return prNumber;
-}
-exports.createPullRequest = createPullRequest;
-/**
- * Convert a Map<string,string> or {[path: string]: string}, where the key is the relative file path in the repository,
- * and the value is the text content. The files will be converted to a Map also containing the file mode information '100644'
- * @param {Object<string, string | null> | Map<string, string | null>} textFiles a map/object where the key is the relative file path and the value is the text file content
- * @returns {Changes} Map of the file path to the string file content and the file mode '100644'
- */
-function parseTextFiles(textFiles) {
-    const changes = new Map();
-    if (textFiles instanceof Map) {
-        textFiles.forEach((content, path) => {
-            if (typeof path !== 'string' ||
-                (content !== null && typeof content !== 'string')) {
-                throw TypeError('The file changeset provided must have a string key and a string/null value');
-            }
-            changes.set(path, new types_1.FileData(content));
-        });
-    }
-    else {
-        for (const [path, content] of Object.entries(textFiles)) {
-            if (typeof path !== 'string' ||
-                (content !== null && typeof content !== 'string')) {
-                throw TypeError('The file changeset provided must have a string key and a string/null value');
-            }
-            changes.set(path, new types_1.FileData(content));
-        }
-    }
-    return changes;
-}
-exports.parseTextFiles = parseTextFiles;
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
-/***/ 58192:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.setupLogger = exports.logger = void 0;
-class NullLogger {
-    constructor() {
-        this.error = () => { };
-        this.warn = () => { };
-        this.info = () => { };
-        this.debug = () => { };
-        this.trace = () => { };
-    }
-}
-let logger = new NullLogger();
-exports.logger = logger;
-function setupLogger(userLogger) {
-    if (userLogger) {
-        exports.logger = logger = userLogger;
-    }
-    else {
-        exports.logger = logger = new NullLogger();
-    }
-}
-exports.setupLogger = setupLogger;
-//# sourceMappingURL=logger.js.map
-
-/***/ }),
-
-/***/ 13984:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PatchSyntaxError = exports.FileData = void 0;
-/**
- * The content and the mode of a file.
- * Default file mode is a text file which has code '100644'.
- * If `content` is not null, then `content` must be the entire file content.
- * See https://developer.github.com/v3/git/trees/#tree-object for details on mode.
- */
-class FileData {
-    constructor(content, mode = '100644') {
-        this.mode = mode;
-        this.content = content;
-    }
-}
-exports.FileData = FileData;
-class PatchSyntaxError extends Error {
-    constructor(message) {
-        super(message);
-        this.name = 'PatchSyntaxError';
-    }
-}
-exports.PatchSyntaxError = PatchSyntaxError;
-//# sourceMappingURL=types.js.map
-
-/***/ }),
-
-/***/ 15276:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getSuggestedHunks = exports.parseAllHunks = exports.parsePatch = void 0;
-const parseDiff = __nccwpck_require__(94833);
-const diff_1 = __nccwpck_require__(71672);
-// This header is ignored for calculating patch ranges, but is neccessary
-// for parsing a diff
-const _DIFF_HEADER = `diff --git a/file.ext b/file.ext
-index cac8fbc..87f387c 100644
---- a/file.ext
-+++ b/file.ext
-`;
-/**
- * Given a patch expressed in GNU diff format, return the range of lines
- * from the original content that are changed.
- * @param diff Diff expressed in GNU diff format.
- * @returns Hunk[]
- */
-function parsePatch(patch) {
-    return parseAllHunks(_DIFF_HEADER + patch).get('file.ext') || [];
-}
-exports.parsePatch = parsePatch;
-/**
- * Given a diff expressed in GNU diff format, return the range of lines
- * from the original content that are changed.
- * @param diff Diff expressed in GNU diff format.
- * @returns Map<string, Hunk[]>
- */
-function parseAllHunks(diff) {
-    const hunksByFile = new Map();
-    parseDiff(diff).forEach(file => {
-        const filename = file.to ? file.to : file.from;
-        const chunks = file.chunks.map(chunk => {
-            let oldStart = chunk.oldStart;
-            let newStart = chunk.newStart;
-            let normalLines = 0;
-            let changeSeen = false;
-            const newLines = [];
-            let previousLine = null;
-            let nextLine = null;
-            chunk.changes.forEach(change => {
-                // strip off leading '+', '-', or ' ' and trailing carriage return
-                const content = change.content.substring(1).replace(/[\n\r]+$/g, '');
-                if (change.type === 'normal') {
-                    normalLines++;
-                    if (changeSeen) {
-                        if (nextLine === null) {
-                            nextLine = content;
-                        }
-                    }
-                    else {
-                        previousLine = content;
-                    }
-                }
-                else {
-                    if (change.type === 'add') {
-                        // strip off leading '+' and trailing carriage return
-                        newLines.push(content);
-                    }
-                    if (!changeSeen) {
-                        oldStart += normalLines;
-                        newStart += normalLines;
-                        changeSeen = true;
-                    }
-                }
-            });
-            const newEnd = newStart + chunk.newLines - normalLines - 1;
-            const oldEnd = oldStart + chunk.oldLines - normalLines - 1;
-            let hunk = {
-                oldStart: oldStart,
-                oldEnd: oldEnd,
-                newStart: newStart,
-                newEnd: newEnd,
-                newContent: newLines,
-            };
-            if (previousLine) {
-                hunk = { ...hunk, previousLine: previousLine };
-            }
-            if (nextLine) {
-                hunk = { ...hunk, nextLine: nextLine };
-            }
-            return hunk;
-        });
-        hunksByFile.set(filename, chunks);
-    });
-    return hunksByFile;
-}
-exports.parseAllHunks = parseAllHunks;
-/**
- * Given two texts, return the range of lines that are changed.
- * @param oldContent The original content.
- * @param newContent The new content.
- * @returns Hunk[]
- */
-function getSuggestedHunks(oldContent, newContent) {
-    const diff = (0, diff_1.createPatch)('unused', oldContent, newContent);
-    return parseAllHunks(diff).get('unused') || [];
-}
-exports.getSuggestedHunks = getSuggestedHunks;
-//# sourceMappingURL=diff-utils.js.map
-
-/***/ }),
-
-/***/ 26381:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2020 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//    http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.partitionSuggestedHunksByScope = exports.getRawSuggestionHunks = exports.adjustHunkDown = exports.adjustHunkUp = void 0;
-const diff_utils_1 = __nccwpck_require__(15276);
-const logger_1 = __nccwpck_require__(58192);
-/**
- * Shift a Hunk up one line so it starts one line earlier.
- * @param {Hunk} hunk
- * @returns {Hunk | null} the adjusted Hunk or null if there is no preceeding line.
- */
-function adjustHunkUp(hunk) {
-    if (!hunk.previousLine) {
-        return null;
-    }
-    return {
-        oldStart: hunk.oldStart - 1,
-        oldEnd: hunk.oldEnd,
-        newStart: hunk.newStart - 1,
-        newEnd: hunk.newEnd,
-        newContent: [hunk.previousLine, ...hunk.newContent],
-    };
-}
-exports.adjustHunkUp = adjustHunkUp;
-/**
- * Shift a Hunk up one line so it ends one line later.
- * @param {Hunk} hunk
- * @returns {Hunk | null} the adjusted Hunk or null if there is no following line.
- */
-function adjustHunkDown(hunk) {
-    if (!hunk.nextLine) {
-        return null;
-    }
-    return {
-        oldStart: hunk.oldStart,
-        oldEnd: hunk.oldEnd + 1,
-        newStart: hunk.newStart,
-        newEnd: hunk.newEnd + 1,
-        newContent: hunk.newContent.concat(hunk.nextLine),
-    };
-}
-exports.adjustHunkDown = adjustHunkDown;
-/**
- * Given a map where the key is the file name and the value is the
- * old content and new content of the file
- * compute the hunk for each file whose old and new contents differ.
- * Do not compute the hunk if the old content is the same as the new content.
- * The hunk list is sorted and each interval is disjoint.
- * @param {Map<string, FileDiffContent>} diffContents a map of the original file contents and the new file contents
- * @returns the hunks for each file whose old and new contents differ
- */
-function getRawSuggestionHunks(diffContents) {
-    const fileHunks = new Map();
-    diffContents.forEach((fileDiffContent, fileName) => {
-        // if identical don't calculate the hunk and continue in the loop
-        if (fileDiffContent.oldContent === fileDiffContent.newContent) {
-            return;
-        }
-        const hunks = (0, diff_utils_1.getSuggestedHunks)(fileDiffContent.oldContent, fileDiffContent.newContent);
-        fileHunks.set(fileName, hunks);
-    });
-    logger_1.logger.info('Parsed ranges of old and new patch');
-    return fileHunks;
-}
-exports.getRawSuggestionHunks = getRawSuggestionHunks;
-function hunkOverlaps(validHunk, suggestedHunk) {
-    return (suggestedHunk.oldStart >= validHunk.newStart &&
-        suggestedHunk.oldEnd <= validHunk.newEnd);
-}
-function partitionFileHunks(pullRequestHunks, suggestedHunks) {
-    // check ranges: the entirety of the old range of the suggested
-    // hunk must fit inside the new range of the valid Hunks
-    let i = 0;
-    let candidateHunk = pullRequestHunks[i];
-    const validFileHunks = [];
-    const invalidFileHunks = [];
-    suggestedHunks.forEach(suggestedHunk => {
-        while (candidateHunk && suggestedHunk.oldStart > candidateHunk.newEnd) {
-            i++;
-            candidateHunk = pullRequestHunks[i];
-        }
-        if (!candidateHunk) {
-            invalidFileHunks.push(suggestedHunk);
-            return;
-        }
-        // if deletion only or addition only
-        if (suggestedHunk.newEnd < suggestedHunk.newStart ||
-            suggestedHunk.oldEnd < suggestedHunk.oldStart) {
-            // try using previous line
-            let adjustedHunk = adjustHunkUp(suggestedHunk);
-            if (adjustedHunk && hunkOverlaps(candidateHunk, adjustedHunk)) {
-                validFileHunks.push(adjustedHunk);
-                return;
-            }
-            // try using next line
-            adjustedHunk = adjustHunkDown(suggestedHunk);
-            if (adjustedHunk && hunkOverlaps(candidateHunk, adjustedHunk)) {
-                validFileHunks.push(adjustedHunk);
-                return;
-            }
-        }
-        else if (hunkOverlaps(candidateHunk, suggestedHunk)) {
-            validFileHunks.push(suggestedHunk);
-            return;
-        }
-        invalidFileHunks.push(suggestedHunk);
-    });
-    return { validFileHunks, invalidFileHunks };
-}
-/**
- * Split suggested hunks into commentable and non-commentable hunks. Compares the new line ranges
- * from pullRequestHunks against the old line ranges from allSuggestedHunks.
- * @param pullRequestHunks {Map<string, Hunk[]>} The parsed hunks from that represents the valid lines to comment.
- * @param allSuggestedHunks {Map<string, Hunk[]>} The hunks that represent suggested changes.
- * @returns {PartitionedHunks} split hunks
- */
-function partitionSuggestedHunksByScope(pullRequestHunks, allSuggestedHunks) {
-    const validHunks = new Map();
-    const invalidHunks = new Map();
-    allSuggestedHunks.forEach((suggestedHunks, filename) => {
-        const pullRequestFileHunks = pullRequestHunks.get(filename);
-        if (!pullRequestFileHunks) {
-            // file is not the original PR
-            invalidHunks.set(filename, suggestedHunks);
-            return;
-        }
-        const { validFileHunks, invalidFileHunks } = partitionFileHunks(pullRequestFileHunks, suggestedHunks);
-        if (validFileHunks.length > 0) {
-            validHunks.set(filename, validFileHunks);
-        }
-        if (invalidFileHunks.length > 0) {
-            invalidHunks.set(filename, invalidFileHunks);
-        }
-    });
-    return { validHunks, invalidHunks };
-}
-exports.partitionSuggestedHunksByScope = partitionSuggestedHunksByScope;
-//# sourceMappingURL=hunk-utils.js.map
 
 /***/ }),
 
@@ -25322,2666 +22471,6 @@ module.exports = string => {
 		indent
 	};
 };
-
-
-/***/ }),
-
-/***/ 32859:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.convertChangesToDMP = convertChangesToDMP;
-
-/*istanbul ignore end*/
-// See: http://code.google.com/p/google-diff-match-patch/wiki/API
-function convertChangesToDMP(changes) {
-  var ret = [],
-      change,
-      operation;
-
-  for (var i = 0; i < changes.length; i++) {
-    change = changes[i];
-
-    if (change.added) {
-      operation = 1;
-    } else if (change.removed) {
-      operation = -1;
-    } else {
-      operation = 0;
-    }
-
-    ret.push([operation, change.value]);
-  }
-
-  return ret;
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9jb252ZXJ0L2RtcC5qcyJdLCJuYW1lcyI6WyJjb252ZXJ0Q2hhbmdlc1RvRE1QIiwiY2hhbmdlcyIsInJldCIsImNoYW5nZSIsIm9wZXJhdGlvbiIsImkiLCJsZW5ndGgiLCJhZGRlZCIsInJlbW92ZWQiLCJwdXNoIiwidmFsdWUiXSwibWFwcGluZ3MiOiI7Ozs7Ozs7OztBQUFBO0FBQ08sU0FBU0EsbUJBQVQsQ0FBNkJDLE9BQTdCLEVBQXNDO0FBQzNDLE1BQUlDLEdBQUcsR0FBRyxFQUFWO0FBQUEsTUFDSUMsTUFESjtBQUFBLE1BRUlDLFNBRko7O0FBR0EsT0FBSyxJQUFJQyxDQUFDLEdBQUcsQ0FBYixFQUFnQkEsQ0FBQyxHQUFHSixPQUFPLENBQUNLLE1BQTVCLEVBQW9DRCxDQUFDLEVBQXJDLEVBQXlDO0FBQ3ZDRixJQUFBQSxNQUFNLEdBQUdGLE9BQU8sQ0FBQ0ksQ0FBRCxDQUFoQjs7QUFDQSxRQUFJRixNQUFNLENBQUNJLEtBQVgsRUFBa0I7QUFDaEJILE1BQUFBLFNBQVMsR0FBRyxDQUFaO0FBQ0QsS0FGRCxNQUVPLElBQUlELE1BQU0sQ0FBQ0ssT0FBWCxFQUFvQjtBQUN6QkosTUFBQUEsU0FBUyxHQUFHLENBQUMsQ0FBYjtBQUNELEtBRk0sTUFFQTtBQUNMQSxNQUFBQSxTQUFTLEdBQUcsQ0FBWjtBQUNEOztBQUVERixJQUFBQSxHQUFHLENBQUNPLElBQUosQ0FBUyxDQUFDTCxTQUFELEVBQVlELE1BQU0sQ0FBQ08sS0FBbkIsQ0FBVDtBQUNEOztBQUNELFNBQU9SLEdBQVA7QUFDRCIsInNvdXJjZXNDb250ZW50IjpbIi8vIFNlZTogaHR0cDovL2NvZGUuZ29vZ2xlLmNvbS9wL2dvb2dsZS1kaWZmLW1hdGNoLXBhdGNoL3dpa2kvQVBJXG5leHBvcnQgZnVuY3Rpb24gY29udmVydENoYW5nZXNUb0RNUChjaGFuZ2VzKSB7XG4gIGxldCByZXQgPSBbXSxcbiAgICAgIGNoYW5nZSxcbiAgICAgIG9wZXJhdGlvbjtcbiAgZm9yIChsZXQgaSA9IDA7IGkgPCBjaGFuZ2VzLmxlbmd0aDsgaSsrKSB7XG4gICAgY2hhbmdlID0gY2hhbmdlc1tpXTtcbiAgICBpZiAoY2hhbmdlLmFkZGVkKSB7XG4gICAgICBvcGVyYXRpb24gPSAxO1xuICAgIH0gZWxzZSBpZiAoY2hhbmdlLnJlbW92ZWQpIHtcbiAgICAgIG9wZXJhdGlvbiA9IC0xO1xuICAgIH0gZWxzZSB7XG4gICAgICBvcGVyYXRpb24gPSAwO1xuICAgIH1cblxuICAgIHJldC5wdXNoKFtvcGVyYXRpb24sIGNoYW5nZS52YWx1ZV0pO1xuICB9XG4gIHJldHVybiByZXQ7XG59XG4iXX0=
-
-
-/***/ }),
-
-/***/ 16982:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.convertChangesToXML = convertChangesToXML;
-
-/*istanbul ignore end*/
-function convertChangesToXML(changes) {
-  var ret = [];
-
-  for (var i = 0; i < changes.length; i++) {
-    var change = changes[i];
-
-    if (change.added) {
-      ret.push('<ins>');
-    } else if (change.removed) {
-      ret.push('<del>');
-    }
-
-    ret.push(escapeHTML(change.value));
-
-    if (change.added) {
-      ret.push('</ins>');
-    } else if (change.removed) {
-      ret.push('</del>');
-    }
-  }
-
-  return ret.join('');
-}
-
-function escapeHTML(s) {
-  var n = s;
-  n = n.replace(/&/g, '&amp;');
-  n = n.replace(/</g, '&lt;');
-  n = n.replace(/>/g, '&gt;');
-  n = n.replace(/"/g, '&quot;');
-  return n;
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9jb252ZXJ0L3htbC5qcyJdLCJuYW1lcyI6WyJjb252ZXJ0Q2hhbmdlc1RvWE1MIiwiY2hhbmdlcyIsInJldCIsImkiLCJsZW5ndGgiLCJjaGFuZ2UiLCJhZGRlZCIsInB1c2giLCJyZW1vdmVkIiwiZXNjYXBlSFRNTCIsInZhbHVlIiwiam9pbiIsInMiLCJuIiwicmVwbGFjZSJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7O0FBQU8sU0FBU0EsbUJBQVQsQ0FBNkJDLE9BQTdCLEVBQXNDO0FBQzNDLE1BQUlDLEdBQUcsR0FBRyxFQUFWOztBQUNBLE9BQUssSUFBSUMsQ0FBQyxHQUFHLENBQWIsRUFBZ0JBLENBQUMsR0FBR0YsT0FBTyxDQUFDRyxNQUE1QixFQUFvQ0QsQ0FBQyxFQUFyQyxFQUF5QztBQUN2QyxRQUFJRSxNQUFNLEdBQUdKLE9BQU8sQ0FBQ0UsQ0FBRCxDQUFwQjs7QUFDQSxRQUFJRSxNQUFNLENBQUNDLEtBQVgsRUFBa0I7QUFDaEJKLE1BQUFBLEdBQUcsQ0FBQ0ssSUFBSixDQUFTLE9BQVQ7QUFDRCxLQUZELE1BRU8sSUFBSUYsTUFBTSxDQUFDRyxPQUFYLEVBQW9CO0FBQ3pCTixNQUFBQSxHQUFHLENBQUNLLElBQUosQ0FBUyxPQUFUO0FBQ0Q7O0FBRURMLElBQUFBLEdBQUcsQ0FBQ0ssSUFBSixDQUFTRSxVQUFVLENBQUNKLE1BQU0sQ0FBQ0ssS0FBUixDQUFuQjs7QUFFQSxRQUFJTCxNQUFNLENBQUNDLEtBQVgsRUFBa0I7QUFDaEJKLE1BQUFBLEdBQUcsQ0FBQ0ssSUFBSixDQUFTLFFBQVQ7QUFDRCxLQUZELE1BRU8sSUFBSUYsTUFBTSxDQUFDRyxPQUFYLEVBQW9CO0FBQ3pCTixNQUFBQSxHQUFHLENBQUNLLElBQUosQ0FBUyxRQUFUO0FBQ0Q7QUFDRjs7QUFDRCxTQUFPTCxHQUFHLENBQUNTLElBQUosQ0FBUyxFQUFULENBQVA7QUFDRDs7QUFFRCxTQUFTRixVQUFULENBQW9CRyxDQUFwQixFQUF1QjtBQUNyQixNQUFJQyxDQUFDLEdBQUdELENBQVI7QUFDQUMsRUFBQUEsQ0FBQyxHQUFHQSxDQUFDLENBQUNDLE9BQUYsQ0FBVSxJQUFWLEVBQWdCLE9BQWhCLENBQUo7QUFDQUQsRUFBQUEsQ0FBQyxHQUFHQSxDQUFDLENBQUNDLE9BQUYsQ0FBVSxJQUFWLEVBQWdCLE1BQWhCLENBQUo7QUFDQUQsRUFBQUEsQ0FBQyxHQUFHQSxDQUFDLENBQUNDLE9BQUYsQ0FBVSxJQUFWLEVBQWdCLE1BQWhCLENBQUo7QUFDQUQsRUFBQUEsQ0FBQyxHQUFHQSxDQUFDLENBQUNDLE9BQUYsQ0FBVSxJQUFWLEVBQWdCLFFBQWhCLENBQUo7QUFFQSxTQUFPRCxDQUFQO0FBQ0QiLCJzb3VyY2VzQ29udGVudCI6WyJleHBvcnQgZnVuY3Rpb24gY29udmVydENoYW5nZXNUb1hNTChjaGFuZ2VzKSB7XG4gIGxldCByZXQgPSBbXTtcbiAgZm9yIChsZXQgaSA9IDA7IGkgPCBjaGFuZ2VzLmxlbmd0aDsgaSsrKSB7XG4gICAgbGV0IGNoYW5nZSA9IGNoYW5nZXNbaV07XG4gICAgaWYgKGNoYW5nZS5hZGRlZCkge1xuICAgICAgcmV0LnB1c2goJzxpbnM+Jyk7XG4gICAgfSBlbHNlIGlmIChjaGFuZ2UucmVtb3ZlZCkge1xuICAgICAgcmV0LnB1c2goJzxkZWw+Jyk7XG4gICAgfVxuXG4gICAgcmV0LnB1c2goZXNjYXBlSFRNTChjaGFuZ2UudmFsdWUpKTtcblxuICAgIGlmIChjaGFuZ2UuYWRkZWQpIHtcbiAgICAgIHJldC5wdXNoKCc8L2lucz4nKTtcbiAgICB9IGVsc2UgaWYgKGNoYW5nZS5yZW1vdmVkKSB7XG4gICAgICByZXQucHVzaCgnPC9kZWw+Jyk7XG4gICAgfVxuICB9XG4gIHJldHVybiByZXQuam9pbignJyk7XG59XG5cbmZ1bmN0aW9uIGVzY2FwZUhUTUwocykge1xuICBsZXQgbiA9IHM7XG4gIG4gPSBuLnJlcGxhY2UoLyYvZywgJyZhbXA7Jyk7XG4gIG4gPSBuLnJlcGxhY2UoLzwvZywgJyZsdDsnKTtcbiAgbiA9IG4ucmVwbGFjZSgvPi9nLCAnJmd0OycpO1xuICBuID0gbi5yZXBsYWNlKC9cIi9nLCAnJnF1b3Q7Jyk7XG5cbiAgcmV0dXJuIG47XG59XG4iXX0=
-
-
-/***/ }),
-
-/***/ 70546:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffArrays = diffArrays;
-exports.arrayDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-var arrayDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-]();
-
-/*istanbul ignore start*/
-exports.arrayDiff = arrayDiff;
-
-/*istanbul ignore end*/
-arrayDiff.tokenize = function (value) {
-  return value.slice();
-};
-
-arrayDiff.join = arrayDiff.removeEmpty = function (value) {
-  return value;
-};
-
-function diffArrays(oldArr, newArr, callback) {
-  return arrayDiff.diff(oldArr, newArr, callback);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL2FycmF5LmpzIl0sIm5hbWVzIjpbImFycmF5RGlmZiIsIkRpZmYiLCJ0b2tlbml6ZSIsInZhbHVlIiwic2xpY2UiLCJqb2luIiwicmVtb3ZlRW1wdHkiLCJkaWZmQXJyYXlzIiwib2xkQXJyIiwibmV3QXJyIiwiY2FsbGJhY2siLCJkaWZmIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7O0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTs7Ozs7QUFFTyxJQUFNQSxTQUFTLEdBQUc7QUFBSUM7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUEsQ0FBSixFQUFsQjs7Ozs7O0FBQ1BELFNBQVMsQ0FBQ0UsUUFBVixHQUFxQixVQUFTQyxLQUFULEVBQWdCO0FBQ25DLFNBQU9BLEtBQUssQ0FBQ0MsS0FBTixFQUFQO0FBQ0QsQ0FGRDs7QUFHQUosU0FBUyxDQUFDSyxJQUFWLEdBQWlCTCxTQUFTLENBQUNNLFdBQVYsR0FBd0IsVUFBU0gsS0FBVCxFQUFnQjtBQUN2RCxTQUFPQSxLQUFQO0FBQ0QsQ0FGRDs7QUFJTyxTQUFTSSxVQUFULENBQW9CQyxNQUFwQixFQUE0QkMsTUFBNUIsRUFBb0NDLFFBQXBDLEVBQThDO0FBQUUsU0FBT1YsU0FBUyxDQUFDVyxJQUFWLENBQWVILE1BQWYsRUFBdUJDLE1BQXZCLEVBQStCQyxRQUEvQixDQUFQO0FBQWtEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IERpZmYgZnJvbSAnLi9iYXNlJztcblxuZXhwb3J0IGNvbnN0IGFycmF5RGlmZiA9IG5ldyBEaWZmKCk7XG5hcnJheURpZmYudG9rZW5pemUgPSBmdW5jdGlvbih2YWx1ZSkge1xuICByZXR1cm4gdmFsdWUuc2xpY2UoKTtcbn07XG5hcnJheURpZmYuam9pbiA9IGFycmF5RGlmZi5yZW1vdmVFbXB0eSA9IGZ1bmN0aW9uKHZhbHVlKSB7XG4gIHJldHVybiB2YWx1ZTtcbn07XG5cbmV4cG9ydCBmdW5jdGlvbiBkaWZmQXJyYXlzKG9sZEFyciwgbmV3QXJyLCBjYWxsYmFjaykgeyByZXR1cm4gYXJyYXlEaWZmLmRpZmYob2xkQXJyLCBuZXdBcnIsIGNhbGxiYWNrKTsgfVxuIl19
-
-
-/***/ }),
-
-/***/ 21653:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports["default"] = Diff;
-
-/*istanbul ignore end*/
-function Diff() {}
-
-Diff.prototype = {
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  diff: function diff(oldString, newString) {
-    /*istanbul ignore start*/
-    var
-    /*istanbul ignore end*/
-    options = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
-    var callback = options.callback;
-
-    if (typeof options === 'function') {
-      callback = options;
-      options = {};
-    }
-
-    this.options = options;
-    var self = this;
-
-    function done(value) {
-      if (callback) {
-        setTimeout(function () {
-          callback(undefined, value);
-        }, 0);
-        return true;
-      } else {
-        return value;
-      }
-    } // Allow subclasses to massage the input prior to running
-
-
-    oldString = this.castInput(oldString);
-    newString = this.castInput(newString);
-    oldString = this.removeEmpty(this.tokenize(oldString));
-    newString = this.removeEmpty(this.tokenize(newString));
-    var newLen = newString.length,
-        oldLen = oldString.length;
-    var editLength = 1;
-    var maxEditLength = newLen + oldLen;
-    var bestPath = [{
-      newPos: -1,
-      components: []
-    }]; // Seed editLength = 0, i.e. the content starts with the same values
-
-    var oldPos = this.extractCommon(bestPath[0], newString, oldString, 0);
-
-    if (bestPath[0].newPos + 1 >= newLen && oldPos + 1 >= oldLen) {
-      // Identity per the equality and tokenizer
-      return done([{
-        value: this.join(newString),
-        count: newString.length
-      }]);
-    } // Main worker method. checks all permutations of a given edit length for acceptance.
-
-
-    function execEditLength() {
-      for (var diagonalPath = -1 * editLength; diagonalPath <= editLength; diagonalPath += 2) {
-        var basePath =
-        /*istanbul ignore start*/
-        void 0
-        /*istanbul ignore end*/
-        ;
-
-        var addPath = bestPath[diagonalPath - 1],
-            removePath = bestPath[diagonalPath + 1],
-            _oldPos = (removePath ? removePath.newPos : 0) - diagonalPath;
-
-        if (addPath) {
-          // No one else is going to attempt to use this value, clear it
-          bestPath[diagonalPath - 1] = undefined;
-        }
-
-        var canAdd = addPath && addPath.newPos + 1 < newLen,
-            canRemove = removePath && 0 <= _oldPos && _oldPos < oldLen;
-
-        if (!canAdd && !canRemove) {
-          // If this path is a terminal then prune
-          bestPath[diagonalPath] = undefined;
-          continue;
-        } // Select the diagonal that we want to branch from. We select the prior
-        // path whose position in the new string is the farthest from the origin
-        // and does not pass the bounds of the diff graph
-
-
-        if (!canAdd || canRemove && addPath.newPos < removePath.newPos) {
-          basePath = clonePath(removePath);
-          self.pushComponent(basePath.components, undefined, true);
-        } else {
-          basePath = addPath; // No need to clone, we've pulled it from the list
-
-          basePath.newPos++;
-          self.pushComponent(basePath.components, true, undefined);
-        }
-
-        _oldPos = self.extractCommon(basePath, newString, oldString, diagonalPath); // If we have hit the end of both strings, then we are done
-
-        if (basePath.newPos + 1 >= newLen && _oldPos + 1 >= oldLen) {
-          return done(buildValues(self, basePath.components, newString, oldString, self.useLongestToken));
-        } else {
-          // Otherwise track this path as a potential candidate and continue.
-          bestPath[diagonalPath] = basePath;
-        }
-      }
-
-      editLength++;
-    } // Performs the length of edit iteration. Is a bit fugly as this has to support the
-    // sync and async mode which is never fun. Loops over execEditLength until a value
-    // is produced.
-
-
-    if (callback) {
-      (function exec() {
-        setTimeout(function () {
-          // This should not happen, but we want to be safe.
-
-          /* istanbul ignore next */
-          if (editLength > maxEditLength) {
-            return callback();
-          }
-
-          if (!execEditLength()) {
-            exec();
-          }
-        }, 0);
-      })();
-    } else {
-      while (editLength <= maxEditLength) {
-        var ret = execEditLength();
-
-        if (ret) {
-          return ret;
-        }
-      }
-    }
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  pushComponent: function pushComponent(components, added, removed) {
-    var last = components[components.length - 1];
-
-    if (last && last.added === added && last.removed === removed) {
-      // We need to clone here as the component clone operation is just
-      // as shallow array clone
-      components[components.length - 1] = {
-        count: last.count + 1,
-        added: added,
-        removed: removed
-      };
-    } else {
-      components.push({
-        count: 1,
-        added: added,
-        removed: removed
-      });
-    }
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  extractCommon: function extractCommon(basePath, newString, oldString, diagonalPath) {
-    var newLen = newString.length,
-        oldLen = oldString.length,
-        newPos = basePath.newPos,
-        oldPos = newPos - diagonalPath,
-        commonCount = 0;
-
-    while (newPos + 1 < newLen && oldPos + 1 < oldLen && this.equals(newString[newPos + 1], oldString[oldPos + 1])) {
-      newPos++;
-      oldPos++;
-      commonCount++;
-    }
-
-    if (commonCount) {
-      basePath.components.push({
-        count: commonCount
-      });
-    }
-
-    basePath.newPos = newPos;
-    return oldPos;
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  equals: function equals(left, right) {
-    if (this.options.comparator) {
-      return this.options.comparator(left, right);
-    } else {
-      return left === right || this.options.ignoreCase && left.toLowerCase() === right.toLowerCase();
-    }
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  removeEmpty: function removeEmpty(array) {
-    var ret = [];
-
-    for (var i = 0; i < array.length; i++) {
-      if (array[i]) {
-        ret.push(array[i]);
-      }
-    }
-
-    return ret;
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  castInput: function castInput(value) {
-    return value;
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  tokenize: function tokenize(value) {
-    return value.split('');
-  },
-
-  /*istanbul ignore start*/
-
-  /*istanbul ignore end*/
-  join: function join(chars) {
-    return chars.join('');
-  }
-};
-
-function buildValues(diff, components, newString, oldString, useLongestToken) {
-  var componentPos = 0,
-      componentLen = components.length,
-      newPos = 0,
-      oldPos = 0;
-
-  for (; componentPos < componentLen; componentPos++) {
-    var component = components[componentPos];
-
-    if (!component.removed) {
-      if (!component.added && useLongestToken) {
-        var value = newString.slice(newPos, newPos + component.count);
-        value = value.map(function (value, i) {
-          var oldValue = oldString[oldPos + i];
-          return oldValue.length > value.length ? oldValue : value;
-        });
-        component.value = diff.join(value);
-      } else {
-        component.value = diff.join(newString.slice(newPos, newPos + component.count));
-      }
-
-      newPos += component.count; // Common case
-
-      if (!component.added) {
-        oldPos += component.count;
-      }
-    } else {
-      component.value = diff.join(oldString.slice(oldPos, oldPos + component.count));
-      oldPos += component.count; // Reverse add and remove so removes are output first to match common convention
-      // The diffing algorithm is tied to add then remove output and this is the simplest
-      // route to get the desired output with minimal overhead.
-
-      if (componentPos && components[componentPos - 1].added) {
-        var tmp = components[componentPos - 1];
-        components[componentPos - 1] = components[componentPos];
-        components[componentPos] = tmp;
-      }
-    }
-  } // Special case handle for when one terminal is ignored (i.e. whitespace).
-  // For this case we merge the terminal into the prior string and drop the change.
-  // This is only available for string mode.
-
-
-  var lastComponent = components[componentLen - 1];
-
-  if (componentLen > 1 && typeof lastComponent.value === 'string' && (lastComponent.added || lastComponent.removed) && diff.equals('', lastComponent.value)) {
-    components[componentLen - 2].value += lastComponent.value;
-    components.pop();
-  }
-
-  return components;
-}
-
-function clonePath(path) {
-  return {
-    newPos: path.newPos,
-    components: path.components.slice(0)
-  };
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL2Jhc2UuanMiXSwibmFtZXMiOlsiRGlmZiIsInByb3RvdHlwZSIsImRpZmYiLCJvbGRTdHJpbmciLCJuZXdTdHJpbmciLCJvcHRpb25zIiwiY2FsbGJhY2siLCJzZWxmIiwiZG9uZSIsInZhbHVlIiwic2V0VGltZW91dCIsInVuZGVmaW5lZCIsImNhc3RJbnB1dCIsInJlbW92ZUVtcHR5IiwidG9rZW5pemUiLCJuZXdMZW4iLCJsZW5ndGgiLCJvbGRMZW4iLCJlZGl0TGVuZ3RoIiwibWF4RWRpdExlbmd0aCIsImJlc3RQYXRoIiwibmV3UG9zIiwiY29tcG9uZW50cyIsIm9sZFBvcyIsImV4dHJhY3RDb21tb24iLCJqb2luIiwiY291bnQiLCJleGVjRWRpdExlbmd0aCIsImRpYWdvbmFsUGF0aCIsImJhc2VQYXRoIiwiYWRkUGF0aCIsInJlbW92ZVBhdGgiLCJjYW5BZGQiLCJjYW5SZW1vdmUiLCJjbG9uZVBhdGgiLCJwdXNoQ29tcG9uZW50IiwiYnVpbGRWYWx1ZXMiLCJ1c2VMb25nZXN0VG9rZW4iLCJleGVjIiwicmV0IiwiYWRkZWQiLCJyZW1vdmVkIiwibGFzdCIsInB1c2giLCJjb21tb25Db3VudCIsImVxdWFscyIsImxlZnQiLCJyaWdodCIsImNvbXBhcmF0b3IiLCJpZ25vcmVDYXNlIiwidG9Mb3dlckNhc2UiLCJhcnJheSIsImkiLCJzcGxpdCIsImNoYXJzIiwiY29tcG9uZW50UG9zIiwiY29tcG9uZW50TGVuIiwiY29tcG9uZW50Iiwic2xpY2UiLCJtYXAiLCJvbGRWYWx1ZSIsInRtcCIsImxhc3RDb21wb25lbnQiLCJwb3AiLCJwYXRoIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7QUFBZSxTQUFTQSxJQUFULEdBQWdCLENBQUU7O0FBRWpDQSxJQUFJLENBQUNDLFNBQUwsR0FBaUI7QUFBQTs7QUFBQTtBQUNmQyxFQUFBQSxJQURlLGdCQUNWQyxTQURVLEVBQ0NDLFNBREQsRUFDMEI7QUFBQTtBQUFBO0FBQUE7QUFBZEMs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QUcsQ0FBZixJQUNHLE9BQU9NLGFBQWEsQ0FBQ3JELEtBQXJCLEtBQStCLFFBRGxDLEtBRUlxRCxhQUFhLENBQUN0QixLQUFkLElBQXVCc0IsYUFBYSxDQUFDckIsT0FGekMsS0FHR3ZDLElBQUksQ0FBQzJDLE1BQUwsQ0FBWSxFQUFaLEVBQWdCaUIsYUFBYSxDQUFDckQsS0FBOUIsQ0FIUCxFQUc2QztBQUMzQ2EsSUFBQUEsVUFBVSxDQUFDa0MsWUFBWSxHQUFHLENBQWhCLENBQVYsQ0FBNkIvQyxLQUE3QixJQUFzQ3FELGFBQWEsQ0FBQ3JELEtBQXBEO0FBQ0FhLElBQUFBLFVBQVUsQ0FBQ3lDLEdBQVg7QUFDRDs7QUFFRCxTQUFPekMsVUFBUDtBQUNEOztBQUVELFNBQVNZLFNBQVQsQ0FBbUI4QixJQUFuQixFQUF5QjtBQUN2QixTQUFPO0FBQUUzQyxJQUFBQSxNQUFNLEVBQUUyQyxJQUFJLENBQUMzQyxNQUFmO0FBQXVCQyxJQUFBQSxVQUFVLEVBQUUwQyxJQUFJLENBQUMxQyxVQUFMLENBQWdCb0MsS0FBaEIsQ0FBc0IsQ0FBdEI7QUFBbkMsR0FBUDtBQUNEIiwic291cmNlc0NvbnRlbnQiOlsiZXhwb3J0IGRlZmF1bHQgZnVuY3Rpb24gRGlmZigpIHt9XG5cbkRpZmYucHJvdG90eXBlID0ge1xuICBkaWZmKG9sZFN0cmluZywgbmV3U3RyaW5nLCBvcHRpb25zID0ge30pIHtcbiAgICBsZXQgY2FsbGJhY2sgPSBvcHRpb25zLmNhbGxiYWNrO1xuICAgIGlmICh0eXBlb2Ygb3B0aW9ucyA9PT0gJ2Z1bmN0aW9uJykge1xuICAgICAgY2FsbGJhY2sgPSBvcHRpb25zO1xuICAgICAgb3B0aW9ucyA9IHt9O1xuICAgIH1cbiAgICB0aGlzLm9wdGlvbnMgPSBvcHRpb25zO1xuXG4gICAgbGV0IHNlbGYgPSB0aGlzO1xuXG4gICAgZnVuY3Rpb24gZG9uZSh2YWx1ZSkge1xuICAgICAgaWYgKGNhbGxiYWNrKSB7XG4gICAgICAgIHNldFRpbWVvdXQoZnVuY3Rpb24oKSB7IGNhbGxiYWNrKHVuZGVmaW5lZCwgdmFsdWUpOyB9LCAwKTtcbiAgICAgICAgcmV0dXJuIHRydWU7XG4gICAgICB9IGVsc2Uge1xuICAgICAgICByZXR1cm4gdmFsdWU7XG4gICAgICB9XG4gICAgfVxuXG4gICAgLy8gQWxsb3cgc3ViY2xhc3NlcyB0byBtYXNzYWdlIHRoZSBpbnB1dCBwcmlvciB0byBydW5uaW5nXG4gICAgb2xkU3RyaW5nID0gdGhpcy5jYXN0SW5wdXQob2xkU3RyaW5nKTtcbiAgICBuZXdTdHJpbmcgPSB0aGlzLmNhc3RJbnB1dChuZXdTdHJpbmcpO1xuXG4gICAgb2xkU3RyaW5nID0gdGhpcy5yZW1vdmVFbXB0eSh0aGlzLnRva2VuaXplKG9sZFN0cmluZykpO1xuICAgIG5ld1N0cmluZyA9IHRoaXMucmVtb3ZlRW1wdHkodGhpcy50b2tlbml6ZShuZXdTdHJpbmcpKTtcblxuICAgIGxldCBuZXdMZW4gPSBuZXdTdHJpbmcubGVuZ3RoLCBvbGRMZW4gPSBvbGRTdHJpbmcubGVuZ3RoO1xuICAgIGxldCBlZGl0TGVuZ3RoID0gMTtcbiAgICBsZXQgbWF4RWRpdExlbmd0aCA9IG5ld0xlbiArIG9sZExlbjtcbiAgICBsZXQgYmVzdFBhdGggPSBbeyBuZXdQb3M6IC0xLCBjb21wb25lbnRzOiBbXSB9XTtcblxuICAgIC8vIFNlZWQgZWRpdExlbmd0aCA9IDAsIGkuZS4gdGhlIGNvbnRlbnQgc3RhcnRzIHdpdGggdGhlIHNhbWUgdmFsdWVzXG4gICAgbGV0IG9sZFBvcyA9IHRoaXMuZXh0cmFjdENvbW1vbihiZXN0UGF0aFswXSwgbmV3U3RyaW5nLCBvbGRTdHJpbmcsIDApO1xuICAgIGlmIChiZXN0UGF0aFswXS5uZXdQb3MgKyAxID49IG5ld0xlbiAmJiBvbGRQb3MgKyAxID49IG9sZExlbikge1xuICAgICAgLy8gSWRlbnRpdHkgcGVyIHRoZSBlcXVhbGl0eSBhbmQgdG9rZW5pemVyXG4gICAgICByZXR1cm4gZG9uZShbe3ZhbHVlOiB0aGlzLmpvaW4obmV3U3RyaW5nKSwgY291bnQ6IG5ld1N0cmluZy5sZW5ndGh9XSk7XG4gICAgfVxuXG4gICAgLy8gTWFpbiB3b3JrZXIgbWV0aG9kLiBjaGVja3MgYWxsIHBlcm11dGF0aW9ucyBvZiBhIGdpdmVuIGVkaXQgbGVuZ3RoIGZvciBhY2NlcHRhbmNlLlxuICAgIGZ1bmN0aW9uIGV4ZWNFZGl0TGVuZ3RoKCkge1xuICAgICAgZm9yIChsZXQgZGlhZ29uYWxQYXRoID0gLTEgKiBlZGl0TGVuZ3RoOyBkaWFnb25hbFBhdGggPD0gZWRpdExlbmd0aDsgZGlhZ29uYWxQYXRoICs9IDIpIHtcbiAgICAgICAgbGV0IGJhc2VQYXRoO1xuICAgICAgICBsZXQgYWRkUGF0aCA9IGJlc3RQYXRoW2RpYWdvbmFsUGF0aCAtIDFdLFxuICAgICAgICAgICAgcmVtb3ZlUGF0aCA9IGJlc3RQYXRoW2RpYWdvbmFsUGF0aCArIDFdLFxuICAgICAgICAgICAgb2xkUG9zID0gKHJlbW92ZVBhdGggPyByZW1vdmVQYXRoLm5ld1BvcyA6IDApIC0gZGlhZ29uYWxQYXRoO1xuICAgICAgICBpZiAoYWRkUGF0aCkge1xuICAgICAgICAgIC8vIE5vIG9uZSBlbHNlIGlzIGdvaW5nIHRvIGF0dGVtcHQgdG8gdXNlIHRoaXMgdmFsdWUsIGNsZWFyIGl0XG4gICAgICAgICAgYmVzdFBhdGhbZGlhZ29uYWxQYXRoIC0gMV0gPSB1bmRlZmluZWQ7XG4gICAgICAgIH1cblxuICAgICAgICBsZXQgY2FuQWRkID0gYWRkUGF0aCAmJiBhZGRQYXRoLm5ld1BvcyArIDEgPCBuZXdMZW4sXG4gICAgICAgICAgICBjYW5SZW1vdmUgPSByZW1vdmVQYXRoICYmIDAgPD0gb2xkUG9zICYmIG9sZFBvcyA8IG9sZExlbjtcbiAgICAgICAgaWYgKCFjYW5BZGQgJiYgIWNhblJlbW92ZSkge1xuICAgICAgICAgIC8vIElmIHRoaXMgcGF0aCBpcyBhIHRlcm1pbmFsIHRoZW4gcHJ1bmVcbiAgICAgICAgICBiZXN0UGF0aFtkaWFnb25hbFBhdGhdID0gdW5kZWZpbmVkO1xuICAgICAgICAgIGNvbnRpbnVlO1xuICAgICAgICB9XG5cbiAgICAgICAgLy8gU2VsZWN0IHRoZSBkaWFnb25hbCB0aGF0IHdlIHdhbnQgdG8gYnJhbmNoIGZyb20uIFdlIHNlbGVjdCB0aGUgcHJpb3JcbiAgICAgICAgLy8gcGF0aCB3aG9zZSBwb3NpdGlvbiBpbiB0aGUgbmV3IHN0cmluZyBpcyB0aGUgZmFydGhlc3QgZnJvbSB0aGUgb3JpZ2luXG4gICAgICAgIC8vIGFuZCBkb2VzIG5vdCBwYXNzIHRoZSBib3VuZHMgb2YgdGhlIGRpZmYgZ3JhcGhcbiAgICAgICAgaWYgKCFjYW5BZGQgfHwgKGNhblJlbW92ZSAmJiBhZGRQYXRoLm5ld1BvcyA8IHJlbW92ZVBhdGgubmV3UG9zKSkge1xuICAgICAgICAgIGJhc2VQYXRoID0gY2xvbmVQYXRoKHJlbW92ZVBhdGgpO1xuICAgICAgICAgIHNlbGYucHVzaENvbXBvbmVudChiYXNlUGF0aC5jb21wb25lbnRzLCB1bmRlZmluZWQsIHRydWUpO1xuICAgICAgICB9IGVsc2Uge1xuICAgICAgICAgIGJhc2VQYXRoID0gYWRkUGF0aDsgLy8gTm8gbmVlZCB0byBjbG9uZSwgd2UndmUgcHVsbGVkIGl0IGZyb20gdGhlIGxpc3RcbiAgICAgICAgICBiYXNlUGF0aC5uZXdQb3MrKztcbiAgICAgICAgICBzZWxmLnB1c2hDb21wb25lbnQoYmFzZVBhdGguY29tcG9uZW50cywgdHJ1ZSwgdW5kZWZpbmVkKTtcbiAgICAgICAgfVxuXG4gICAgICAgIG9sZFBvcyA9IHNlbGYuZXh0cmFjdENvbW1vbihiYXNlUGF0aCwgbmV3U3RyaW5nLCBvbGRTdHJpbmcsIGRpYWdvbmFsUGF0aCk7XG5cbiAgICAgICAgLy8gSWYgd2UgaGF2ZSBoaXQgdGhlIGVuZCBvZiBib3RoIHN0cmluZ3MsIHRoZW4gd2UgYXJlIGRvbmVcbiAgICAgICAgaWYgKGJhc2VQYXRoLm5ld1BvcyArIDEgPj0gbmV3TGVuICYmIG9sZFBvcyArIDEgPj0gb2xkTGVuKSB7XG4gICAgICAgICAgcmV0dXJuIGRvbmUoYnVpbGRWYWx1ZXMoc2VsZiwgYmFzZVBhdGguY29tcG9uZW50cywgbmV3U3RyaW5nLCBvbGRTdHJpbmcsIHNlbGYudXNlTG9uZ2VzdFRva2VuKSk7XG4gICAgICAgIH0gZWxzZSB7XG4gICAgICAgICAgLy8gT3RoZXJ3aXNlIHRyYWNrIHRoaXMgcGF0aCBhcyBhIHBvdGVudGlhbCBjYW5kaWRhdGUgYW5kIGNvbnRpbnVlLlxuICAgICAgICAgIGJlc3RQYXRoW2RpYWdvbmFsUGF0aF0gPSBiYXNlUGF0aDtcbiAgICAgICAgfVxuICAgICAgfVxuXG4gICAgICBlZGl0TGVuZ3RoKys7XG4gICAgfVxuXG4gICAgLy8gUGVyZm9ybXMgdGhlIGxlbmd0aCBvZiBlZGl0IGl0ZXJhdGlvbi4gSXMgYSBiaXQgZnVnbHkgYXMgdGhpcyBoYXMgdG8gc3VwcG9ydCB0aGVcbiAgICAvLyBzeW5jIGFuZCBhc3luYyBtb2RlIHdoaWNoIGlzIG5ldmVyIGZ1bi4gTG9vcHMgb3ZlciBleGVjRWRpdExlbmd0aCB1bnRpbCBhIHZhbHVlXG4gICAgLy8gaXMgcHJvZHVjZWQuXG4gICAgaWYgKGNhbGxiYWNrKSB7XG4gICAgICAoZnVuY3Rpb24gZXhlYygpIHtcbiAgICAgICAgc2V0VGltZW91dChmdW5jdGlvbigpIHtcbiAgICAgICAgICAvLyBUaGlzIHNob3VsZCBub3QgaGFwcGVuLCBidXQgd2Ugd2FudCB0byBiZSBzYWZlLlxuICAgICAgICAgIC8qIGlzdGFuYnVsIGlnbm9yZSBuZXh0ICovXG4gICAgICAgICAgaWYgKGVkaXRMZW5ndGggPiBtYXhFZGl0TGVuZ3RoKSB7XG4gICAgICAgICAgICByZXR1cm4gY2FsbGJhY2soKTtcbiAgICAgICAgICB9XG5cbiAgICAgICAgICBpZiAoIWV4ZWNFZGl0TGVuZ3RoKCkpIHtcbiAgICAgICAgICAgIGV4ZWMoKTtcbiAgICAgICAgICB9XG4gICAgICAgIH0sIDApO1xuICAgICAgfSgpKTtcbiAgICB9IGVsc2Uge1xuICAgICAgd2hpbGUgKGVkaXRMZW5ndGggPD0gbWF4RWRpdExlbmd0aCkge1xuICAgICAgICBsZXQgcmV0ID0gZXhlY0VkaXRMZW5ndGgoKTtcbiAgICAgICAgaWYgKHJldCkge1xuICAgICAgICAgIHJldHVybiByZXQ7XG4gICAgICAgIH1cbiAgICAgIH1cbiAgICB9XG4gIH0sXG5cbiAgcHVzaENvbXBvbmVudChjb21wb25lbnRzLCBhZGRlZCwgcmVtb3ZlZCkge1xuICAgIGxldCBsYXN0ID0gY29tcG9uZW50c1tjb21wb25lbnRzLmxlbmd0aCAtIDFdO1xuICAgIGlmIChsYXN0ICYmIGxhc3QuYWRkZWQgPT09IGFkZGVkICYmIGxhc3QucmVtb3ZlZCA9PT0gcmVtb3ZlZCkge1xuICAgICAgLy8gV2UgbmVlZCB0byBjbG9uZSBoZXJlIGFzIHRoZSBjb21wb25lbnQgY2xvbmUgb3BlcmF0aW9uIGlzIGp1c3RcbiAgICAgIC8vIGFzIHNoYWxsb3cgYXJyYXkgY2xvbmVcbiAgICAgIGNvbXBvbmVudHNbY29tcG9uZW50cy5sZW5ndGggLSAxXSA9IHtjb3VudDogbGFzdC5jb3VudCArIDEsIGFkZGVkOiBhZGRlZCwgcmVtb3ZlZDogcmVtb3ZlZCB9O1xuICAgIH0gZWxzZSB7XG4gICAgICBjb21wb25lbnRzLnB1c2goe2NvdW50OiAxLCBhZGRlZDogYWRkZWQsIHJlbW92ZWQ6IHJlbW92ZWQgfSk7XG4gICAgfVxuICB9LFxuICBleHRyYWN0Q29tbW9uKGJhc2VQYXRoLCBuZXdTdHJpbmcsIG9sZFN0cmluZywgZGlhZ29uYWxQYXRoKSB7XG4gICAgbGV0IG5ld0xlbiA9IG5ld1N0cmluZy5sZW5ndGgsXG4gICAgICAgIG9sZExlbiA9IG9sZFN0cmluZy5sZW5ndGgsXG4gICAgICAgIG5ld1BvcyA9IGJhc2VQYXRoLm5ld1BvcyxcbiAgICAgICAgb2xkUG9zID0gbmV3UG9zIC0gZGlhZ29uYWxQYXRoLFxuXG4gICAgICAgIGNvbW1vbkNvdW50ID0gMDtcbiAgICB3aGlsZSAobmV3UG9zICsgMSA8IG5ld0xlbiAmJiBvbGRQb3MgKyAxIDwgb2xkTGVuICYmIHRoaXMuZXF1YWxzKG5ld1N0cmluZ1tuZXdQb3MgKyAxXSwgb2xkU3RyaW5nW29sZFBvcyArIDFdKSkge1xuICAgICAgbmV3UG9zKys7XG4gICAgICBvbGRQb3MrKztcbiAgICAgIGNvbW1vbkNvdW50Kys7XG4gICAgfVxuXG4gICAgaWYgKGNvbW1vbkNvdW50KSB7XG4gICAgICBiYXNlUGF0aC5jb21wb25lbnRzLnB1c2goe2NvdW50OiBjb21tb25Db3VudH0pO1xuICAgIH1cblxuICAgIGJhc2VQYXRoLm5ld1BvcyA9IG5ld1BvcztcbiAgICByZXR1cm4gb2xkUG9zO1xuICB9LFxuXG4gIGVxdWFscyhsZWZ0LCByaWdodCkge1xuICAgIGlmICh0aGlzLm9wdGlvbnMuY29tcGFyYXRvcikge1xuICAgICAgcmV0dXJuIHRoaXMub3B0aW9ucy5jb21wYXJhdG9yKGxlZnQsIHJpZ2h0KTtcbiAgICB9IGVsc2Uge1xuICAgICAgcmV0dXJuIGxlZnQgPT09IHJpZ2h0XG4gICAgICAgIHx8ICh0aGlzLm9wdGlvbnMuaWdub3JlQ2FzZSAmJiBsZWZ0LnRvTG93ZXJDYXNlKCkgPT09IHJpZ2h0LnRvTG93ZXJDYXNlKCkpO1xuICAgIH1cbiAgfSxcbiAgcmVtb3ZlRW1wdHkoYXJyYXkpIHtcbiAgICBsZXQgcmV0ID0gW107XG4gICAgZm9yIChsZXQgaSA9IDA7IGkgPCBhcnJheS5sZW5ndGg7IGkrKykge1xuICAgICAgaWYgKGFycmF5W2ldKSB7XG4gICAgICAgIHJldC5wdXNoKGFycmF5W2ldKTtcbiAgICAgIH1cbiAgICB9XG4gICAgcmV0dXJuIHJldDtcbiAgfSxcbiAgY2FzdElucHV0KHZhbHVlKSB7XG4gICAgcmV0dXJuIHZhbHVlO1xuICB9LFxuICB0b2tlbml6ZSh2YWx1ZSkge1xuICAgIHJldHVybiB2YWx1ZS5zcGxpdCgnJyk7XG4gIH0sXG4gIGpvaW4oY2hhcnMpIHtcbiAgICByZXR1cm4gY2hhcnMuam9pbignJyk7XG4gIH1cbn07XG5cbmZ1bmN0aW9uIGJ1aWxkVmFsdWVzKGRpZmYsIGNvbXBvbmVudHMsIG5ld1N0cmluZywgb2xkU3RyaW5nLCB1c2VMb25nZXN0VG9rZW4pIHtcbiAgbGV0IGNvbXBvbmVudFBvcyA9IDAsXG4gICAgICBjb21wb25lbnRMZW4gPSBjb21wb25lbnRzLmxlbmd0aCxcbiAgICAgIG5ld1BvcyA9IDAsXG4gICAgICBvbGRQb3MgPSAwO1xuXG4gIGZvciAoOyBjb21wb25lbnRQb3MgPCBjb21wb25lbnRMZW47IGNvbXBvbmVudFBvcysrKSB7XG4gICAgbGV0IGNvbXBvbmVudCA9IGNvbXBvbmVudHNbY29tcG9uZW50UG9zXTtcbiAgICBpZiAoIWNvbXBvbmVudC5yZW1vdmVkKSB7XG4gICAgICBpZiAoIWNvbXBvbmVudC5hZGRlZCAmJiB1c2VMb25nZXN0VG9rZW4pIHtcbiAgICAgICAgbGV0IHZhbHVlID0gbmV3U3RyaW5nLnNsaWNlKG5ld1BvcywgbmV3UG9zICsgY29tcG9uZW50LmNvdW50KTtcbiAgICAgICAgdmFsdWUgPSB2YWx1ZS5tYXAoZnVuY3Rpb24odmFsdWUsIGkpIHtcbiAgICAgICAgICBsZXQgb2xkVmFsdWUgPSBvbGRTdHJpbmdbb2xkUG9zICsgaV07XG4gICAgICAgICAgcmV0dXJuIG9sZFZhbHVlLmxlbmd0aCA+IHZhbHVlLmxlbmd0aCA/IG9sZFZhbHVlIDogdmFsdWU7XG4gICAgICAgIH0pO1xuXG4gICAgICAgIGNvbXBvbmVudC52YWx1ZSA9IGRpZmYuam9pbih2YWx1ZSk7XG4gICAgICB9IGVsc2Uge1xuICAgICAgICBjb21wb25lbnQudmFsdWUgPSBkaWZmLmpvaW4obmV3U3RyaW5nLnNsaWNlKG5ld1BvcywgbmV3UG9zICsgY29tcG9uZW50LmNvdW50KSk7XG4gICAgICB9XG4gICAgICBuZXdQb3MgKz0gY29tcG9uZW50LmNvdW50O1xuXG4gICAgICAvLyBDb21tb24gY2FzZVxuICAgICAgaWYgKCFjb21wb25lbnQuYWRkZWQpIHtcbiAgICAgICAgb2xkUG9zICs9IGNvbXBvbmVudC5jb3VudDtcbiAgICAgIH1cbiAgICB9IGVsc2Uge1xuICAgICAgY29tcG9uZW50LnZhbHVlID0gZGlmZi5qb2luKG9sZFN0cmluZy5zbGljZShvbGRQb3MsIG9sZFBvcyArIGNvbXBvbmVudC5jb3VudCkpO1xuICAgICAgb2xkUG9zICs9IGNvbXBvbmVudC5jb3VudDtcblxuICAgICAgLy8gUmV2ZXJzZSBhZGQgYW5kIHJlbW92ZSBzbyByZW1vdmVzIGFyZSBvdXRwdXQgZmlyc3QgdG8gbWF0Y2ggY29tbW9uIGNvbnZlbnRpb25cbiAgICAgIC8vIFRoZSBkaWZmaW5nIGFsZ29yaXRobSBpcyB0aWVkIHRvIGFkZCB0aGVuIHJlbW92ZSBvdXRwdXQgYW5kIHRoaXMgaXMgdGhlIHNpbXBsZXN0XG4gICAgICAvLyByb3V0ZSB0byBnZXQgdGhlIGRlc2lyZWQgb3V0cHV0IHdpdGggbWluaW1hbCBvdmVyaGVhZC5cbiAgICAgIGlmIChjb21wb25lbnRQb3MgJiYgY29tcG9uZW50c1tjb21wb25lbnRQb3MgLSAxXS5hZGRlZCkge1xuICAgICAgICBsZXQgdG1wID0gY29tcG9uZW50c1tjb21wb25lbnRQb3MgLSAxXTtcbiAgICAgICAgY29tcG9uZW50c1tjb21wb25lbnRQb3MgLSAxXSA9IGNvbXBvbmVudHNbY29tcG9uZW50UG9zXTtcbiAgICAgICAgY29tcG9uZW50c1tjb21wb25lbnRQb3NdID0gdG1wO1xuICAgICAgfVxuICAgIH1cbiAgfVxuXG4gIC8vIFNwZWNpYWwgY2FzZSBoYW5kbGUgZm9yIHdoZW4gb25lIHRlcm1pbmFsIGlzIGlnbm9yZWQgKGkuZS4gd2hpdGVzcGFjZSkuXG4gIC8vIEZvciB0aGlzIGNhc2Ugd2UgbWVyZ2UgdGhlIHRlcm1pbmFsIGludG8gdGhlIHByaW9yIHN0cmluZyBhbmQgZHJvcCB0aGUgY2hhbmdlLlxuICAvLyBUaGlzIGlzIG9ubHkgYXZhaWxhYmxlIGZvciBzdHJpbmcgbW9kZS5cbiAgbGV0IGxhc3RDb21wb25lbnQgPSBjb21wb25lbnRzW2NvbXBvbmVudExlbiAtIDFdO1xuICBpZiAoY29tcG9uZW50TGVuID4gMVxuICAgICAgJiYgdHlwZW9mIGxhc3RDb21wb25lbnQudmFsdWUgPT09ICdzdHJpbmcnXG4gICAgICAmJiAobGFzdENvbXBvbmVudC5hZGRlZCB8fCBsYXN0Q29tcG9uZW50LnJlbW92ZWQpXG4gICAgICAmJiBkaWZmLmVxdWFscygnJywgbGFzdENvbXBvbmVudC52YWx1ZSkpIHtcbiAgICBjb21wb25lbnRzW2NvbXBvbmVudExlbiAtIDJdLnZhbHVlICs9IGxhc3RDb21wb25lbnQudmFsdWU7XG4gICAgY29tcG9uZW50cy5wb3AoKTtcbiAgfVxuXG4gIHJldHVybiBjb21wb25lbnRzO1xufVxuXG5mdW5jdGlvbiBjbG9uZVBhdGgocGF0aCkge1xuICByZXR1cm4geyBuZXdQb3M6IHBhdGgubmV3UG9zLCBjb21wb25lbnRzOiBwYXRoLmNvbXBvbmVudHMuc2xpY2UoMCkgfTtcbn1cbiJdfQ==
-
-
-/***/ }),
-
-/***/ 22081:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffChars = diffChars;
-exports.characterDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-var characterDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-]();
-
-/*istanbul ignore start*/
-exports.characterDiff = characterDiff;
-
-/*istanbul ignore end*/
-function diffChars(oldStr, newStr, options) {
-  return characterDiff.diff(oldStr, newStr, options);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL2NoYXJhY3Rlci5qcyJdLCJuYW1lcyI6WyJjaGFyYWN0ZXJEaWZmIiwiRGlmZiIsImRpZmZDaGFycyIsIm9sZFN0ciIsIm5ld1N0ciIsIm9wdGlvbnMiLCJkaWZmIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7O0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTs7Ozs7QUFFTyxJQUFNQSxhQUFhLEdBQUc7QUFBSUM7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUEsQ0FBSixFQUF0Qjs7Ozs7O0FBQ0EsU0FBU0MsU0FBVCxDQUFtQkMsTUFBbkIsRUFBMkJDLE1BQTNCLEVBQW1DQyxPQUFuQyxFQUE0QztBQUFFLFNBQU9MLGFBQWEsQ0FBQ00sSUFBZCxDQUFtQkgsTUFBbkIsRUFBMkJDLE1BQTNCLEVBQW1DQyxPQUFuQyxDQUFQO0FBQXFEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IERpZmYgZnJvbSAnLi9iYXNlJztcblxuZXhwb3J0IGNvbnN0IGNoYXJhY3RlckRpZmYgPSBuZXcgRGlmZigpO1xuZXhwb3J0IGZ1bmN0aW9uIGRpZmZDaGFycyhvbGRTdHIsIG5ld1N0ciwgb3B0aW9ucykgeyByZXR1cm4gY2hhcmFjdGVyRGlmZi5kaWZmKG9sZFN0ciwgbmV3U3RyLCBvcHRpb25zKTsgfVxuIl19
-
-
-/***/ }),
-
-/***/ 48941:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffCss = diffCss;
-exports.cssDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-var cssDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-]();
-
-/*istanbul ignore start*/
-exports.cssDiff = cssDiff;
-
-/*istanbul ignore end*/
-cssDiff.tokenize = function (value) {
-  return value.split(/([{}:;,]|\s+)/);
-};
-
-function diffCss(oldStr, newStr, callback) {
-  return cssDiff.diff(oldStr, newStr, callback);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL2Nzcy5qcyJdLCJuYW1lcyI6WyJjc3NEaWZmIiwiRGlmZiIsInRva2VuaXplIiwidmFsdWUiLCJzcGxpdCIsImRpZmZDc3MiLCJvbGRTdHIiLCJuZXdTdHIiLCJjYWxsYmFjayIsImRpZmYiXSwibWFwcGluZ3MiOiI7Ozs7Ozs7Ozs7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBOzs7OztBQUVPLElBQU1BLE9BQU8sR0FBRztBQUFJQztBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQSxDQUFKLEVBQWhCOzs7Ozs7QUFDUEQsT0FBTyxDQUFDRSxRQUFSLEdBQW1CLFVBQVNDLEtBQVQsRUFBZ0I7QUFDakMsU0FBT0EsS0FBSyxDQUFDQyxLQUFOLENBQVksZUFBWixDQUFQO0FBQ0QsQ0FGRDs7QUFJTyxTQUFTQyxPQUFULENBQWlCQyxNQUFqQixFQUF5QkMsTUFBekIsRUFBaUNDLFFBQWpDLEVBQTJDO0FBQUUsU0FBT1IsT0FBTyxDQUFDUyxJQUFSLENBQWFILE1BQWIsRUFBcUJDLE1BQXJCLEVBQTZCQyxRQUE3QixDQUFQO0FBQWdEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IERpZmYgZnJvbSAnLi9iYXNlJztcblxuZXhwb3J0IGNvbnN0IGNzc0RpZmYgPSBuZXcgRGlmZigpO1xuY3NzRGlmZi50b2tlbml6ZSA9IGZ1bmN0aW9uKHZhbHVlKSB7XG4gIHJldHVybiB2YWx1ZS5zcGxpdCgvKFt7fTo7LF18XFxzKykvKTtcbn07XG5cbmV4cG9ydCBmdW5jdGlvbiBkaWZmQ3NzKG9sZFN0ciwgbmV3U3RyLCBjYWxsYmFjaykgeyByZXR1cm4gY3NzRGlmZi5kaWZmKG9sZFN0ciwgbmV3U3RyLCBjYWxsYmFjayk7IH1cbiJdfQ==
-
-
-/***/ }),
-
-/***/ 86335:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffJson = diffJson;
-exports.canonicalize = canonicalize;
-exports.jsonDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_line = __nccwpck_require__(41591)
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-function _typeof(obj) { "@babel/helpers - typeof"; if (typeof Symbol === "function" && typeof Symbol.iterator === "symbol") { _typeof = function _typeof(obj) { return typeof obj; }; } else { _typeof = function _typeof(obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }; } return _typeof(obj); }
-
-/*istanbul ignore end*/
-var objectPrototypeToString = Object.prototype.toString;
-var jsonDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-](); // Discriminate between two lines of pretty-printed, serialized JSON where one of them has a
-// dangling comma and the other doesn't. Turns out including the dangling comma yields the nicest output:
-
-/*istanbul ignore start*/
-exports.jsonDiff = jsonDiff;
-
-/*istanbul ignore end*/
-jsonDiff.useLongestToken = true;
-jsonDiff.tokenize =
-/*istanbul ignore start*/
-_line
-/*istanbul ignore end*/
-.
-/*istanbul ignore start*/
-lineDiff
-/*istanbul ignore end*/
-.tokenize;
-
-jsonDiff.castInput = function (value) {
-  /*istanbul ignore start*/
-  var _this$options =
-  /*istanbul ignore end*/
-  this.options,
-      undefinedReplacement = _this$options.undefinedReplacement,
-      _this$options$stringi = _this$options.stringifyReplacer,
-      stringifyReplacer = _this$options$stringi === void 0 ? function (k, v)
-  /*istanbul ignore start*/
-  {
-    return (
-      /*istanbul ignore end*/
-      typeof v === 'undefined' ? undefinedReplacement : v
-    );
-  } : _this$options$stringi;
-  return typeof value === 'string' ? value : JSON.stringify(canonicalize(value, null, null, stringifyReplacer), stringifyReplacer, '  ');
-};
-
-jsonDiff.equals = function (left, right) {
-  return (
-    /*istanbul ignore start*/
-    _base
-    /*istanbul ignore end*/
-    [
-    /*istanbul ignore start*/
-    "default"
-    /*istanbul ignore end*/
-    ].prototype.equals.call(jsonDiff, left.replace(/,([\r\n])/g, '$1'), right.replace(/,([\r\n])/g, '$1'))
-  );
-};
-
-function diffJson(oldObj, newObj, options) {
-  return jsonDiff.diff(oldObj, newObj, options);
-} // This function handles the presence of circular references by bailing out when encountering an
-// object that is already on the "stack" of items being processed. Accepts an optional replacer
-
-
-function canonicalize(obj, stack, replacementStack, replacer, key) {
-  stack = stack || [];
-  replacementStack = replacementStack || [];
-
-  if (replacer) {
-    obj = replacer(key, obj);
-  }
-
-  var i;
-
-  for (i = 0; i < stack.length; i += 1) {
-    if (stack[i] === obj) {
-      return replacementStack[i];
-    }
-  }
-
-  var canonicalizedObj;
-
-  if ('[object Array]' === objectPrototypeToString.call(obj)) {
-    stack.push(obj);
-    canonicalizedObj = new Array(obj.length);
-    replacementStack.push(canonicalizedObj);
-
-    for (i = 0; i < obj.length; i += 1) {
-      canonicalizedObj[i] = canonicalize(obj[i], stack, replacementStack, replacer, key);
-    }
-
-    stack.pop();
-    replacementStack.pop();
-    return canonicalizedObj;
-  }
-
-  if (obj && obj.toJSON) {
-    obj = obj.toJSON();
-  }
-
-  if (
-  /*istanbul ignore start*/
-  _typeof(
-  /*istanbul ignore end*/
-  obj) === 'object' && obj !== null) {
-    stack.push(obj);
-    canonicalizedObj = {};
-    replacementStack.push(canonicalizedObj);
-
-    var sortedKeys = [],
-        _key;
-
-    for (_key in obj) {
-      /* istanbul ignore else */
-      if (obj.hasOwnProperty(_key)) {
-        sortedKeys.push(_key);
-      }
-    }
-
-    sortedKeys.sort();
-
-    for (i = 0; i < sortedKeys.length; i += 1) {
-      _key = sortedKeys[i];
-      canonicalizedObj[_key] = canonicalize(obj[_key], stack, replacementStack, replacer, _key);
-    }
-
-    stack.pop();
-    replacementStack.pop();
-  } else {
-    canonicalizedObj = obj;
-  }
-
-  return canonicalizedObj;
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL2pzb24uanMiXSwibmFtZXMiOlsib2JqZWN0UHJvdG90eXBlVG9TdHJpbmciLCJPYmplY3QiLCJwcm90b3R5cGUiLCJ0b1N0cmluZyIsImpzb25EaWZmIiwiRGlmZiIsInVzZUxvbmdlc3RUb2tlbiIsInRva2VuaXplIiwibGluZURpZmYiLCJjYXN0SW5wdXQiLCJ2YWx1ZSIsIm9wdGlvbnMiLCJ1bmRlZmluZWRSZXBsYWNlbWVudCIsInN0cmluZ2lmeVJlcGxhY2VyIiwiayIsInYiLCJKU09OIiwic3RyaW5naWZ5IiwiY2Fub25pY2FsaXplIiwiZXF1YWxzIiwibGVmdCIsInJpZ2h0IiwiY2FsbCIsInJlcGxhY2UiLCJkaWZmSnNvbiIsIm9sZE9iaiIsIm5ld09iaiIsImRpZmYiLCJvYmoiLCJzdGFjayIsInJlcGxhY2VtZW50U3RhY2siLCJyZXBsYWNlciIsImtleSIsImkiLCJsZW5ndGgiLCJjYW5vbmljYWxpemVkT2JqIiwicHVzaCIsIkFycmF5IiwicG9wIiwidG9KU09OIiwic29ydGVkS2V5cyIsImhhc093blByb3BlcnR5Iiwic29ydCJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7Ozs7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUNBO0FBQUE7QUFBQTtBQUFBO0FBQUE7Ozs7Ozs7QUFFQSxJQUFNQSx1QkFBdUIsR0FBR0MsTUFBTSxDQUFDQyxTQUFQLENBQWlCQyxRQUFqRDtBQUdPLElBQU1DLFFBQVEsR0FBRztBQUFJQztBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQTtBQUFBQSxDQUFKLEVBQWpCLEMsQ0FDUDtBQUNBOzs7Ozs7QUFDQUQsUUFBUSxDQUFDRSxlQUFULEdBQTJCLElBQTNCO0FBRUFGLFFBQVEsQ0FBQ0csUUFBVDtBQUFvQkM7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQTtBQUFBLENBQVNELFFBQTdCOztBQUNBSCxRQUFRLENBQUNLLFNBQVQsR0FBcUIsVUFBU0MsS0FB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Z0IsR0FBR1AsR0FBbkI7QUFDRDs7QUFDRCxTQUFPTyxnQkFBUDtBQUNEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IERpZmYgZnJvbSAnLi9iYXNlJztcbmltcG9ydCB7bGluZURpZmZ9IGZyb20gJy4vbGluZSc7XG5cbmNvbnN0IG9iamVjdFByb3RvdHlwZVRvU3RyaW5nID0gT2JqZWN0LnByb3RvdHlwZS50b1N0cmluZztcblxuXG5leHBvcnQgY29uc3QganNvbkRpZmYgPSBuZXcgRGlmZigpO1xuLy8gRGlzY3JpbWluYXRlIGJldHdlZW4gdHdvIGxpbmVzIG9mIHByZXR0eS1wcmludGVkLCBzZXJpYWxpemVkIEpTT04gd2hlcmUgb25lIG9mIHRoZW0gaGFzIGFcbi8vIGRhbmdsaW5nIGNvbW1hIGFuZCB0aGUgb3RoZXIgZG9lc24ndC4gVHVybnMgb3V0IGluY2x1ZGluZyB0aGUgZGFuZ2xpbmcgY29tbWEgeWllbGRzIHRoZSBuaWNlc3Qgb3V0cHV0OlxuanNvbkRpZmYudXNlTG9uZ2VzdFRva2VuID0gdHJ1ZTtcblxuanNvbkRpZmYudG9rZW5pemUgPSBsaW5lRGlmZi50b2tlbml6ZTtcbmpzb25EaWZmLmNhc3RJbnB1dCA9IGZ1bmN0aW9uKHZhbHVlKSB7XG4gIGNvbnN0IHt1bmRlZmluZWRSZXBsYWNlbWVudCwgc3RyaW5naWZ5UmVwbGFjZXIgPSAoaywgdikgPT4gdHlwZW9mIHYgPT09ICd1bmRlZmluZWQnID8gdW5kZWZpbmVkUmVwbGFjZW1lbnQgOiB2fSA9IHRoaXMub3B0aW9ucztcblxuICByZXR1cm4gdHlwZW9mIHZhbHVlID09PSAnc3RyaW5nJyA/IHZhbHVlIDogSlNPTi5zdHJpbmdpZnkoY2Fub25pY2FsaXplKHZhbHVlLCBudWxsLCBudWxsLCBzdHJpbmdpZnlSZXBsYWNlciksIHN0cmluZ2lmeVJlcGxhY2VyLCAnICAnKTtcbn07XG5qc29uRGlmZi5lcXVhbHMgPSBmdW5jdGlvbihsZWZ0LCByaWdodCkge1xuICByZXR1cm4gRGlmZi5wcm90b3R5cGUuZXF1YWxzLmNhbGwoanNvbkRpZmYsIGxlZnQucmVwbGFjZSgvLChbXFxyXFxuXSkvZywgJyQxJyksIHJpZ2h0LnJlcGxhY2UoLywoW1xcclxcbl0pL2csICckMScpKTtcbn07XG5cbmV4cG9ydCBmdW5jdGlvbiBkaWZmSnNvbihvbGRPYmosIG5ld09iaiwgb3B0aW9ucykgeyByZXR1cm4ganNvbkRpZmYuZGlmZihvbGRPYmosIG5ld09iaiwgb3B0aW9ucyk7IH1cblxuLy8gVGhpcyBmdW5jdGlvbiBoYW5kbGVzIHRoZSBwcmVzZW5jZSBvZiBjaXJjdWxhciByZWZlcmVuY2VzIGJ5IGJhaWxpbmcgb3V0IHdoZW4gZW5jb3VudGVyaW5nIGFuXG4vLyBvYmplY3QgdGhhdCBpcyBhbHJlYWR5IG9uIHRoZSBcInN0YWNrXCIgb2YgaXRlbXMgYmVpbmcgcHJvY2Vzc2VkLiBBY2NlcHRzIGFuIG9wdGlvbmFsIHJlcGxhY2VyXG5leHBvcnQgZnVuY3Rpb24gY2Fub25pY2FsaXplKG9iaiwgc3RhY2ssIHJlcGxhY2VtZW50U3RhY2ssIHJlcGxhY2VyLCBrZXkpIHtcbiAgc3RhY2sgPSBzdGFjayB8fCBbXTtcbiAgcmVwbGFjZW1lbnRTdGFjayA9IHJlcGxhY2VtZW50U3RhY2sgfHwgW107XG5cbiAgaWYgKHJlcGxhY2VyKSB7XG4gICAgb2JqID0gcmVwbGFjZXIoa2V5LCBvYmopO1xuICB9XG5cbiAgbGV0IGk7XG5cbiAgZm9yIChpID0gMDsgaSA8IHN0YWNrLmxlbmd0aDsgaSArPSAxKSB7XG4gICAgaWYgKHN0YWNrW2ldID09PSBvYmopIHtcbiAgICAgIHJldHVybiByZXBsYWNlbWVudFN0YWNrW2ldO1xuICAgIH1cbiAgfVxuXG4gIGxldCBjYW5vbmljYWxpemVkT2JqO1xuXG4gIGlmICgnW29iamVjdCBBcnJheV0nID09PSBvYmplY3RQcm90b3R5cGVUb1N0cmluZy5jYWxsKG9iaikpIHtcbiAgICBzdGFjay5wdXNoKG9iaik7XG4gICAgY2Fub25pY2FsaXplZE9iaiA9IG5ldyBBcnJheShvYmoubGVuZ3RoKTtcbiAgICByZXBsYWNlbWVudFN0YWNrLnB1c2goY2Fub25pY2FsaXplZE9iaik7XG4gICAgZm9yIChpID0gMDsgaSA8IG9iai5sZW5ndGg7IGkgKz0gMSkge1xuICAgICAgY2Fub25pY2FsaXplZE9ialtpXSA9IGNhbm9uaWNhbGl6ZShvYmpbaV0sIHN0YWNrLCByZXBsYWNlbWVudFN0YWNrLCByZXBsYWNlciwga2V5KTtcbiAgICB9XG4gICAgc3RhY2sucG9wKCk7XG4gICAgcmVwbGFjZW1lbnRTdGFjay5wb3AoKTtcbiAgICByZXR1cm4gY2Fub25pY2FsaXplZE9iajtcbiAgfVxuXG4gIGlmIChvYmogJiYgb2JqLnRvSlNPTikge1xuICAgIG9iaiA9IG9iai50b0pTT04oKTtcbiAgfVxuXG4gIGlmICh0eXBlb2Ygb2JqID09PSAnb2JqZWN0JyAmJiBvYmogIT09IG51bGwpIHtcbiAgICBzdGFjay5wdXNoKG9iaik7XG4gICAgY2Fub25pY2FsaXplZE9iaiA9IHt9O1xuICAgIHJlcGxhY2VtZW50U3RhY2sucHVzaChjYW5vbmljYWxpemVkT2JqKTtcbiAgICBsZXQgc29ydGVkS2V5cyA9IFtdLFxuICAgICAgICBrZXk7XG4gICAgZm9yIChrZXkgaW4gb2JqKSB7XG4gICAgICAvKiBpc3RhbmJ1bCBpZ25vcmUgZWxzZSAqL1xuICAgICAgaWYgKG9iai5oYXNPd25Qcm9wZXJ0eShrZXkpKSB7XG4gICAgICAgIHNvcnRlZEtleXMucHVzaChrZXkpO1xuICAgICAgfVxuICAgIH1cbiAgICBzb3J0ZWRLZXlzLnNvcnQoKTtcbiAgICBmb3IgKGkgPSAwOyBpIDwgc29ydGVkS2V5cy5sZW5ndGg7IGkgKz0gMSkge1xuICAgICAga2V5ID0gc29ydGVkS2V5c1tpXTtcbiAgICAgIGNhbm9uaWNhbGl6ZWRPYmpba2V5XSA9IGNhbm9uaWNhbGl6ZShvYmpba2V5XSwgc3RhY2ssIHJlcGxhY2VtZW50U3RhY2ssIHJlcGxhY2VyLCBrZXkpO1xuICAgIH1cbiAgICBzdGFjay5wb3AoKTtcbiAgICByZXBsYWNlbWVudFN0YWNrLnBvcCgpO1xuICB9IGVsc2Uge1xuICAgIGNhbm9uaWNhbGl6ZWRPYmogPSBvYmo7XG4gIH1cbiAgcmV0dXJuIGNhbm9uaWNhbGl6ZWRPYmo7XG59XG4iXX0=
-
-
-/***/ }),
-
-/***/ 41591:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffLines = diffLines;
-exports.diffTrimmedLines = diffTrimmedLines;
-exports.lineDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_params = __nccwpck_require__(45704)
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-var lineDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-]();
-
-/*istanbul ignore start*/
-exports.lineDiff = lineDiff;
-
-/*istanbul ignore end*/
-lineDiff.tokenize = function (value) {
-  var retLines = [],
-      linesAndNewlines = value.split(/(\n|\r\n)/); // Ignore the final empty token that occurs if the string ends with a new line
-
-  if (!linesAndNewlines[linesAndNewlines.length - 1]) {
-    linesAndNewlines.pop();
-  } // Merge the content and line separators into single tokens
-
-
-  for (var i = 0; i < linesAndNewlines.length; i++) {
-    var line = linesAndNewlines[i];
-
-    if (i % 2 && !this.options.newlineIsToken) {
-      retLines[retLines.length - 1] += line;
-    } else {
-      if (this.options.ignoreWhitespace) {
-        line = line.trim();
-      }
-
-      retLines.push(line);
-    }
-  }
-
-  return retLines;
-};
-
-function diffLines(oldStr, newStr, callback) {
-  return lineDiff.diff(oldStr, newStr, callback);
-}
-
-function diffTrimmedLines(oldStr, newStr, callback) {
-  var options =
-  /*istanbul ignore start*/
-  (0,
-  /*istanbul ignore end*/
-
-  /*istanbul ignore start*/
-  _params
-  /*istanbul ignore end*/
-  .
-  /*istanbul ignore start*/
-  generateOptions)
-  /*istanbul ignore end*/
-  (callback, {
-    ignoreWhitespace: true
-  });
-  return lineDiff.diff(oldStr, newStr, options);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL2xpbmUuanMiXSwibmFtZXMiOlsibGluZURpZmYiLCJEaWZmIiwidG9rZW5pemUiLCJ2YWx1ZSIsInJldExpbmVzIiwibGluZXNBbmROZXdsaW5lcyIsInNwbGl0IiwibGVuZ3RoIiwicG9wIiwiaSIsImxpbmUiLCJvcHRpb25zIiwibmV3bGluZUlzVG9rZW4iLCJpZ25vcmVXaGl0ZXNwYWNlIiwidHJpbSIsInB1c2giLCJkaWZmTGluZXMiLCJvbGRTdHIiLCJuZXdTdHIiLCJjYWxsYmFjayIsImRpZmYiLCJkaWZmVHJpbW1lZExpbmVzIiwiZ2VuZXJhdGVPcHRpb25zIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7OztBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBQ0E7QUFBQTtBQUFBO0FBQUE7QUFBQTs7Ozs7QUFFTyxJQUFNQSxRQUFRLEdBQUc7QUFBSUM7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUEsQ0FBSixFQUFqQjs7Ozs7O0FBQ1BELFFBQVEsQ0FBQ0UsUUFBVCxHQUFvQixVQUFTQyxLQUFULEVBQWdCO0FBQ2xDLE1BQUlDLFFBQVEsR0FBRyxFQUFmO0FBQUEsTUFDSUMsZ0JBQWdCLEdBQUdGLEtBQUssQ0FBQ0csS0FBTixDQUFZLFdBQVosQ0FEdkIsQ0FEa0MsQ0FJbEM7O0FBQ0EsTUFBSSxDQUFDRCxnQkFBZ0IsQ0FBQ0EsZ0JBQWdCLENBQUNFLE1BQWpCLEdBQTBCLENBQTNCLENBQXJCLEVBQW9EO0FBQ2xERixJQUFBQSxnQkFBZ0IsQ0FBQ0csR0FBakI7QUFDRCxHQVBpQyxDQVNsQzs7O0FBQ0EsT0FBSyxJQUFJQyxDQUFDLEdBQUcsQ0FBYixFQUFnQkEsQ0FBQyxHQUFHSixnQkFBZ0IsQ0FBQ0UsTUFBckMsRUFBNkNFLENBQUMsRUFBOUMsRUFBa0Q7QUFDaEQsUUFBSUMsSUFBSSxHQUFHTCxnQkFBZ0IsQ0FBQ0ksQ0FBRCxDQUEzQjs7QUFFQSxRQUFJQSxDQUFDLEdBQUcsQ0FBSixJQUFTLENBQUMsS0FBS0UsT0FBTCxDQUFhQyxjQUEzQixFQUEyQztBQUN6Q1IsTUFBQUEsUUFBUSxDQUFDQSxRQUFRLENBQUNHLE1BQVQsR0FBa0IsQ0FBbkIsQ0FBUixJQUFpQ0csSUFBakM7QUFDRCxLQUZELE1BRU87QUFDTCxVQUFJLEtBQUtDLE9BQUwsQ0FBYUUsZ0JBQWpCLEVBQW1DO0FBQ2pDSCxRQUFBQSxJQUFJLEdBQUdBLElBQUksQ0FBQ0ksSUFBTCxFQUFQO0FBQ0Q7O0FBQ0RWLE1BQUFBLFFBQVEsQ0FBQ1csSUFBVCxDQUFjTCxJQUFkO0FBQ0Q7QUFDRjs7QUFFRCxTQUFPTixRQUFQO0FBQ0QsQ0F4QkQ7O0FBMEJPLFNBQVNZLFNBQVQsQ0FBbUJDLE1BQW5CLEVBQTJCQyxNQUEzQixFQUFtQ0MsUUFBbkMsRUFBNkM7QUFBRSxTQUFPbkIsUUFBUSxDQUFDb0IsSUFBVCxDQUFjSCxNQUFkLEVBQXNCQyxNQUF0QixFQUE4QkMsUUFBOUIsQ0FBUDtBQUFpRDs7QUFDaEcsU0FBU0UsZ0JBQVQsQ0FBMEJKLE1BQTFCLEVBQWtDQyxNQUFsQyxFQUEwQ0MsUUFBMUMsRUFBb0Q7QUFDekQsTUFBSVIsT0FBTztBQUFHO0FBQUE7QUFBQTs7QUFBQVc7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQTtBQUFBLEdBQWdCSCxRQUFoQixFQUEwQjtBQUFDTixJQUFBQSxnQkFBZ0IsRUFBRTtBQUFuQixHQUExQixDQUFkO0FBQ0EsU0FBT2IsUUFBUSxDQUFDb0IsSUFBVCxDQUFjSCxNQUFkLEVBQXNCQyxNQUF0QixFQUE4QlAsT0FBOUIsQ0FBUDtBQUNEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IERpZmYgZnJvbSAnLi9iYXNlJztcbmltcG9ydCB7Z2VuZXJhdGVPcHRpb25zfSBmcm9tICcuLi91dGlsL3BhcmFtcyc7XG5cbmV4cG9ydCBjb25zdCBsaW5lRGlmZiA9IG5ldyBEaWZmKCk7XG5saW5lRGlmZi50b2tlbml6ZSA9IGZ1bmN0aW9uKHZhbHVlKSB7XG4gIGxldCByZXRMaW5lcyA9IFtdLFxuICAgICAgbGluZXNBbmROZXdsaW5lcyA9IHZhbHVlLnNwbGl0KC8oXFxufFxcclxcbikvKTtcblxuICAvLyBJZ25vcmUgdGhlIGZpbmFsIGVtcHR5IHRva2VuIHRoYXQgb2NjdXJzIGlmIHRoZSBzdHJpbmcgZW5kcyB3aXRoIGEgbmV3IGxpbmVcbiAgaWYgKCFsaW5lc0FuZE5ld2xpbmVzW2xpbmVzQW5kTmV3bGluZXMubGVuZ3RoIC0gMV0pIHtcbiAgICBsaW5lc0FuZE5ld2xpbmVzLnBvcCgpO1xuICB9XG5cbiAgLy8gTWVyZ2UgdGhlIGNvbnRlbnQgYW5kIGxpbmUgc2VwYXJhdG9ycyBpbnRvIHNpbmdsZSB0b2tlbnNcbiAgZm9yIChsZXQgaSA9IDA7IGkgPCBsaW5lc0FuZE5ld2xpbmVzLmxlbmd0aDsgaSsrKSB7XG4gICAgbGV0IGxpbmUgPSBsaW5lc0FuZE5ld2xpbmVzW2ldO1xuXG4gICAgaWYgKGkgJSAyICYmICF0aGlzLm9wdGlvbnMubmV3bGluZUlzVG9rZW4pIHtcbiAgICAgIHJldExpbmVzW3JldExpbmVzLmxlbmd0aCAtIDFdICs9IGxpbmU7XG4gICAgfSBlbHNlIHtcbiAgICAgIGlmICh0aGlzLm9wdGlvbnMuaWdub3JlV2hpdGVzcGFjZSkge1xuICAgICAgICBsaW5lID0gbGluZS50cmltKCk7XG4gICAgICB9XG4gICAgICByZXRMaW5lcy5wdXNoKGxpbmUpO1xuICAgIH1cbiAgfVxuXG4gIHJldHVybiByZXRMaW5lcztcbn07XG5cbmV4cG9ydCBmdW5jdGlvbiBkaWZmTGluZXMob2xkU3RyLCBuZXdTdHIsIGNhbGxiYWNrKSB7IHJldHVybiBsaW5lRGlmZi5kaWZmKG9sZFN0ciwgbmV3U3RyLCBjYWxsYmFjayk7IH1cbmV4cG9ydCBmdW5jdGlvbiBkaWZmVHJpbW1lZExpbmVzKG9sZFN0ciwgbmV3U3RyLCBjYWxsYmFjaykge1xuICBsZXQgb3B0aW9ucyA9IGdlbmVyYXRlT3B0aW9ucyhjYWxsYmFjaywge2lnbm9yZVdoaXRlc3BhY2U6IHRydWV9KTtcbiAgcmV0dXJuIGxpbmVEaWZmLmRpZmYob2xkU3RyLCBuZXdTdHIsIG9wdGlvbnMpO1xufVxuIl19
-
-
-/***/ }),
-
-/***/ 33577:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffSentences = diffSentences;
-exports.sentenceDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-var sentenceDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-]();
-
-/*istanbul ignore start*/
-exports.sentenceDiff = sentenceDiff;
-
-/*istanbul ignore end*/
-sentenceDiff.tokenize = function (value) {
-  return value.split(/(\S.+?[.!?])(?=\s+|$)/);
-};
-
-function diffSentences(oldStr, newStr, callback) {
-  return sentenceDiff.diff(oldStr, newStr, callback);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL3NlbnRlbmNlLmpzIl0sIm5hbWVzIjpbInNlbnRlbmNlRGlmZiIsIkRpZmYiLCJ0b2tlbml6ZSIsInZhbHVlIiwic3BsaXQiLCJkaWZmU2VudGVuY2VzIiwib2xkU3RyIiwibmV3U3RyIiwiY2FsbGJhY2siLCJkaWZmIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7O0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTs7Ozs7QUFHTyxJQUFNQSxZQUFZLEdBQUc7QUFBSUM7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUE7QUFBQUEsQ0FBSixFQUFyQjs7Ozs7O0FBQ1BELFlBQVksQ0FBQ0UsUUFBYixHQUF3QixVQUFTQyxLQUFULEVBQWdCO0FBQ3RDLFNBQU9BLEtBQUssQ0FBQ0MsS0FBTixDQUFZLHVCQUFaLENBQVA7QUFDRCxDQUZEOztBQUlPLFNBQVNDLGFBQVQsQ0FBdUJDLE1BQXZCLEVBQStCQyxNQUEvQixFQUF1Q0MsUUFBdkMsRUFBaUQ7QUFBRSxTQUFPUixZQUFZLENBQUNTLElBQWIsQ0FBa0JILE1BQWxCLEVBQTBCQyxNQUExQixFQUFrQ0MsUUFBbEMsQ0FBUDtBQUFxRCIsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCBEaWZmIGZyb20gJy4vYmFzZSc7XG5cblxuZXhwb3J0IGNvbnN0IHNlbnRlbmNlRGlmZiA9IG5ldyBEaWZmKCk7XG5zZW50ZW5jZURpZmYudG9rZW5pemUgPSBmdW5jdGlvbih2YWx1ZSkge1xuICByZXR1cm4gdmFsdWUuc3BsaXQoLyhcXFMuKz9bLiE/XSkoPz1cXHMrfCQpLyk7XG59O1xuXG5leHBvcnQgZnVuY3Rpb24gZGlmZlNlbnRlbmNlcyhvbGRTdHIsIG5ld1N0ciwgY2FsbGJhY2spIHsgcmV0dXJuIHNlbnRlbmNlRGlmZi5kaWZmKG9sZFN0ciwgbmV3U3RyLCBjYWxsYmFjayk7IH1cbiJdfQ==
-
-
-/***/ }),
-
-/***/ 46992:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.diffWords = diffWords;
-exports.diffWordsWithSpace = diffWordsWithSpace;
-exports.wordDiff = void 0;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_params = __nccwpck_require__(45704)
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-// Based on https://en.wikipedia.org/wiki/Latin_script_in_Unicode
-//
-// Ranges and exceptions:
-// Latin-1 Supplement, 0080–00FF
-//  - U+00D7  × Multiplication sign
-//  - U+00F7  ÷ Division sign
-// Latin Extended-A, 0100–017F
-// Latin Extended-B, 0180–024F
-// IPA Extensions, 0250–02AF
-// Spacing Modifier Letters, 02B0–02FF
-//  - U+02C7  ˇ &#711;  Caron
-//  - U+02D8  ˘ &#728;  Breve
-//  - U+02D9  ˙ &#729;  Dot Above
-//  - U+02DA  ˚ &#730;  Ring Above
-//  - U+02DB  ˛ &#731;  Ogonek
-//  - U+02DC  ˜ &#732;  Small Tilde
-//  - U+02DD  ˝ &#733;  Double Acute Accent
-// Latin Extended Additional, 1E00–1EFF
-var extendedWordChars = /^[A-Za-z\xC0-\u02C6\u02C8-\u02D7\u02DE-\u02FF\u1E00-\u1EFF]+$/;
-var reWhitespace = /\S/;
-var wordDiff = new
-/*istanbul ignore start*/
-_base
-/*istanbul ignore end*/
-[
-/*istanbul ignore start*/
-"default"
-/*istanbul ignore end*/
-]();
-
-/*istanbul ignore start*/
-exports.wordDiff = wordDiff;
-
-/*istanbul ignore end*/
-wordDiff.equals = function (left, right) {
-  if (this.options.ignoreCase) {
-    left = left.toLowerCase();
-    right = right.toLowerCase();
-  }
-
-  return left === right || this.options.ignoreWhitespace && !reWhitespace.test(left) && !reWhitespace.test(right);
-};
-
-wordDiff.tokenize = function (value) {
-  // All whitespace symbols except newline group into one token, each newline - in separate token
-  var tokens = value.split(/([^\S\r\n]+|[()[\]{}'"\r\n]|\b)/); // Join the boundary splits that we do not consider to be boundaries. This is primarily the extended Latin character set.
-
-  for (var i = 0; i < tokens.length - 1; i++) {
-    // If we have an empty string in the next field and we have only word chars before and after, merge
-    if (!tokens[i + 1] && tokens[i + 2] && extendedWordChars.test(tokens[i]) && extendedWordChars.test(tokens[i + 2])) {
-      tokens[i] += tokens[i + 2];
-      tokens.splice(i + 1, 2);
-      i--;
-    }
-  }
-
-  return tokens;
-};
-
-function diffWords(oldStr, newStr, options) {
-  options =
-  /*istanbul ignore start*/
-  (0,
-  /*istanbul ignore end*/
-
-  /*istanbul ignore start*/
-  _params
-  /*istanbul ignore end*/
-  .
-  /*istanbul ignore start*/
-  generateOptions)
-  /*istanbul ignore end*/
-  (options, {
-    ignoreWhitespace: true
-  });
-  return wordDiff.diff(oldStr, newStr, options);
-}
-
-function diffWordsWithSpace(oldStr, newStr, options) {
-  return wordDiff.diff(oldStr, newStr, options);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9kaWZmL3dvcmQuanMiXSwibmFtZXMiOlsiZXh0ZW5kZWRXb3JkQ2hhcnMiLCJyZVdoaXRlc3BhY2UiLCJ3b3JkRGlmZiIsIkRpZmYiLCJlcXVhbHMiLCJsZWZ0IiwicmlnaHQiLCJvcHRpb25zIiwiaWdub3JlQ2FzZSIsInRvTG93ZXJDYXNlIiwiaWdub3JlV2hpdGVzcGFjZSIsInRlc3QiLCJ0b2tlbml6ZSIsInZhbHVlIiwidG9rZW5zIiwic3BsaXQiLCJpIiwibGVuZ3RoIiwic3BsaWNlIiwiZGlmZldvcmRzIiwib2xkU3RyIiwibmV3U3RyIiwiZ2VuZXJhdGVPcHRpb25zIiwiZGlmZiIsImRpZmZXb3Jkc1dpdGhTcGFjZSJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7Ozs7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUNBO0FBQUE7QUFBQTtBQUFBO0FBQUE7Ozs7O0FBRUE7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0EsSUFBTUEsaUJBQWlCLEdBQUcsK0RBQTFCO0FBRUEsSUFBTUMsWUFBWSxHQUFHLElBQXJCO0FBRU8sSUFBTUMsUUFBUSxHQUFHO0FBQUlDO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUFBLENBQUosRUFBakI7Ozs7OztBQUNQRCxRQUFRLENBQUNFLE1BQVQsR0FBa0IsVUFBU0MsSUFBVCxFQUFlQyxLQUFmLEVBQXNCO0FBQ3RDLE1BQUksS0FBS0MsT0FBTCxDQUFhQyxVQUFqQixFQUE2QjtBQUMzQkgsSUFBQUEsSUFBSSxHQUFHQSxJQUFJLENBQUNJLFdBQUwsRUFBUDtBQUNBSCxJQUFBQSxLQUFLLEdBQUdBLEtBQUssQ0FBQ0csV0FBTixFQUFSO0FBQ0Q7O0FBQ0QsU0FBT0osSUFBSSxLQUFLQyxLQUFULElBQW1CLEtBQUtDLE9BQUwsQ0FBYUcsZ0JBQWIsSUFBaUMsQ0FBQ1QsWUFBWSxDQUFDVSxJQUFiLENBQWtCTixJQUFsQixDQUFsQyxJQUE2RCxDQUFDSixZQUFZLENBQUNVLElBQWIsQ0FBa0JMLEtBQWxCLENBQXhGO0FBQ0QsQ0FORDs7QUFPQUosUUFBUSxDQUFDVSxRQUFULEdBQW9CLFVBQVNDLEtBQVQsRUFBZ0I7QUFDbEM7QUFDQSxNQUFJQyxNQUFNLEdBQUdELEtBQUssQ0FBQ0UsS0FBTixDQUFZLGlDQUFaLENBQWIsQ0FGa0MsQ0FJbEM7O0FBQ0EsT0FBSyxJQUFJQyxDQUFDLEdBQUcsQ0FBYixFQUFnQkEsQ0FBQyxHQUFHRixNQUFNLENBQUNHLE1BQVAsR0FBZ0IsQ0FBcEMsRUFBdUNELENBQUMsRUFBeEMsRUFBNEM7QUFDMUM7QUFDQSxRQUFJLENBQUNGLE1BQU0sQ0FBQ0UsQ0FBQyxHQUFHLENBQUwsQ0FBUCxJQUFrQkYsTUFBTSxDQUFDRSxDQUFDLEdBQUcsQ0FBTCxDQUF4QixJQUNLaEIsaUJBQWlCLENBQUNXLElBQWxCLENBQXVCRyxNQUFNLENBQUNFLENBQUQsQ0FBN0IsQ0FETCxJQUVLaEIsaUJBQWlCLENBQUNXLElBQWxCLENBQXVCRyxNQUFNLENBQUNFLENBQUMsR0FBRyxDQUFMLENBQTdCLENBRlQsRUFFZ0Q7QUFDOUNGLE1BQUFBLE1BQU0sQ0FBQ0UsQ0FBRCxDQUFOLElBQWFGLE1BQU0sQ0FBQ0UsQ0FBQyxHQUFHLENBQUwsQ0FBbkI7QUFDQUYsTUFBQUEsTUFBTSxDQUFDSSxNQUFQLENBQWNGLENBQUMsR0FBRyxDQUFsQixFQUFxQixDQUFyQjtBQUNBQSxNQUFBQSxDQUFDO0FBQ0Y7QUFDRjs7QUFFRCxTQUFPRixNQUFQO0FBQ0QsQ0FqQkQ7O0FBbUJPLFNBQVNLLFNBQVQsQ0FBbUJDLE1BQW5CLEVBQTJCQyxNQUEzQixFQUFtQ2QsT0FBbkMsRUFBNEM7QUFDakRBLEVBQUFBLE9BQU87QUFBRztBQUFBO0FBQUE7O0FBQUFlO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUFBO0FBQUE7QUFBQSxHQUFnQmYsT0FBaEIsRUFBeUI7QUFBQ0csSUFBQUEsZ0JBQWdCLEVBQUU7QUFBbkIsR0FBekIsQ0FBVjtBQUNBLFNBQU9SLFFBQVEsQ0FBQ3FCLElBQVQsQ0FBY0gsTUFBZCxFQUFzQkMsTUFBdEIsRUFBOEJkLE9BQTlCLENBQVA7QUFDRDs7QUFFTSxTQUFTaUIsa0JBQVQsQ0FBNEJKLE1BQTVCLEVBQW9DQyxNQUFwQyxFQUE0Q2QsT0FBNUMsRUFBcUQ7QUFDMUQsU0FBT0wsUUFBUSxDQUFDcUIsSUFBVCxDQUFjSCxNQUFkLEVBQXNCQyxNQUF0QixFQUE4QmQsT0FBOUIsQ0FBUDtBQUNEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IERpZmYgZnJvbSAnLi9iYXNlJztcbmltcG9ydCB7Z2VuZXJhdGVPcHRpb25zfSBmcm9tICcuLi91dGlsL3BhcmFtcyc7XG5cbi8vIEJhc2VkIG9uIGh0dHBzOi8vZW4ud2lraXBlZGlhLm9yZy93aWtpL0xhdGluX3NjcmlwdF9pbl9Vbmljb2RlXG4vL1xuLy8gUmFuZ2VzIGFuZCBleGNlcHRpb25zOlxuLy8gTGF0aW4tMSBTdXBwbGVtZW50LCAwMDgw4oCTMDBGRlxuLy8gIC0gVSswMEQ3ICDDlyBNdWx0aXBsaWNhdGlvbiBzaWduXG4vLyAgLSBVKzAwRjcgIMO3IERpdmlzaW9uIHNpZ25cbi8vIExhdGluIEV4dGVuZGVkLUEsIDAxMDDigJMwMTdGXG4vLyBMYXRpbiBFeHRlbmRlZC1CLCAwMTgw4oCTMDI0RlxuLy8gSVBBIEV4dGVuc2lvbnMsIDAyNTDigJMwMkFGXG4vLyBTcGFjaW5nIE1vZGlmaWVyIExldHRlcnMsIDAyQjDigJMwMkZGXG4vLyAgLSBVKzAyQzcgIMuHICYjNzExOyAgQ2Fyb25cbi8vICAtIFUrMDJEOCAgy5ggJiM3Mjg7ICBCcmV2ZVxuLy8gIC0gVSswMkQ5ICDLmSAmIzcyOTsgIERvdCBBYm92ZVxuLy8gIC0gVSswMkRBICDLmiAmIzczMDsgIFJpbmcgQWJvdmVcbi8vICAtIFUrMDJEQiAgy5sgJiM3MzE7ICBPZ29uZWtcbi8vICAtIFUrMDJEQyAgy5wgJiM3MzI7ICBTbWFsbCBUaWxkZVxuLy8gIC0gVSswMkREICDLnSAmIzczMzsgIERvdWJsZSBBY3V0ZSBBY2NlbnRcbi8vIExhdGluIEV4dGVuZGVkIEFkZGl0aW9uYWwsIDFFMDDigJMxRUZGXG5jb25zdCBleHRlbmRlZFdvcmRDaGFycyA9IC9eW2EtekEtWlxcdXtDMH0tXFx1e0ZGfVxcdXtEOH0tXFx1e0Y2fVxcdXtGOH0tXFx1ezJDNn1cXHV7MkM4fS1cXHV7MkQ3fVxcdXsyREV9LVxcdXsyRkZ9XFx1ezFFMDB9LVxcdXsxRUZGfV0rJC91O1xuXG5jb25zdCByZVdoaXRlc3BhY2UgPSAvXFxTLztcblxuZXhwb3J0IGNvbnN0IHdvcmREaWZmID0gbmV3IERpZmYoKTtcbndvcmREaWZmLmVxdWFscyA9IGZ1bmN0aW9uKGxlZnQsIHJpZ2h0KSB7XG4gIGlmICh0aGlzLm9wdGlvbnMuaWdub3JlQ2FzZSkge1xuICAgIGxlZnQgPSBsZWZ0LnRvTG93ZXJDYXNlKCk7XG4gICAgcmlnaHQgPSByaWdodC50b0xvd2VyQ2FzZSgpO1xuICB9XG4gIHJldHVybiBsZWZ0ID09PSByaWdodCB8fCAodGhpcy5vcHRpb25zLmlnbm9yZVdoaXRlc3BhY2UgJiYgIXJlV2hpdGVzcGFjZS50ZXN0KGxlZnQpICYmICFyZVdoaXRlc3BhY2UudGVzdChyaWdodCkpO1xufTtcbndvcmREaWZmLnRva2VuaXplID0gZnVuY3Rpb24odmFsdWUpIHtcbiAgLy8gQWxsIHdoaXRlc3BhY2Ugc3ltYm9scyBleGNlcHQgbmV3bGluZSBncm91cCBpbnRvIG9uZSB0b2tlbiwgZWFjaCBuZXdsaW5lIC0gaW4gc2VwYXJhdGUgdG9rZW5cbiAgbGV0IHRva2VucyA9IHZhbHVlLnNwbGl0KC8oW15cXFNcXHJcXG5dK3xbKClbXFxde30nXCJcXHJcXG5dfFxcYikvKTtcblxuICAvLyBKb2luIHRoZSBib3VuZGFyeSBzcGxpdHMgdGhhdCB3ZSBkbyBub3QgY29uc2lkZXIgdG8gYmUgYm91bmRhcmllcy4gVGhpcyBpcyBwcmltYXJpbHkgdGhlIGV4dGVuZGVkIExhdGluIGNoYXJhY3RlciBzZXQuXG4gIGZvciAobGV0IGkgPSAwOyBpIDwgdG9rZW5zLmxlbmd0aCAtIDE7IGkrKykge1xuICAgIC8vIElmIHdlIGhhdmUgYW4gZW1wdHkgc3RyaW5nIGluIHRoZSBuZXh0IGZpZWxkIGFuZCB3ZSBoYXZlIG9ubHkgd29yZCBjaGFycyBiZWZvcmUgYW5kIGFmdGVyLCBtZXJnZVxuICAgIGlmICghdG9rZW5zW2kgKyAxXSAmJiB0b2tlbnNbaSArIDJdXG4gICAgICAgICAgJiYgZXh0ZW5kZWRXb3JkQ2hhcnMudGVzdCh0b2tlbnNbaV0pXG4gICAgICAgICAgJiYgZXh0ZW5kZWRXb3JkQ2hhcnMudGVzdCh0b2tlbnNbaSArIDJdKSkge1xuICAgICAgdG9rZW5zW2ldICs9IHRva2Vuc1tpICsgMl07XG4gICAgICB0b2tlbnMuc3BsaWNlKGkgKyAxLCAyKTtcbiAgICAgIGktLTtcbiAgICB9XG4gIH1cblxuICByZXR1cm4gdG9rZW5zO1xufTtcblxuZXhwb3J0IGZ1bmN0aW9uIGRpZmZXb3JkcyhvbGRTdHIsIG5ld1N0ciwgb3B0aW9ucykge1xuICBvcHRpb25zID0gZ2VuZXJhdGVPcHRpb25zKG9wdGlvbnMsIHtpZ25vcmVXaGl0ZXNwYWNlOiB0cnVlfSk7XG4gIHJldHVybiB3b3JkRGlmZi5kaWZmKG9sZFN0ciwgbmV3U3RyLCBvcHRpb25zKTtcbn1cblxuZXhwb3J0IGZ1bmN0aW9uIGRpZmZXb3Jkc1dpdGhTcGFjZShvbGRTdHIsIG5ld1N0ciwgb3B0aW9ucykge1xuICByZXR1cm4gd29yZERpZmYuZGlmZihvbGRTdHIsIG5ld1N0ciwgb3B0aW9ucyk7XG59XG4iXX0=
-
-
-/***/ }),
-
-/***/ 71672:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-Object.defineProperty(exports, "Diff", ({
-  enumerable: true,
-  get: function get() {
-    return _base["default"];
-  }
-}));
-Object.defineProperty(exports, "diffChars", ({
-  enumerable: true,
-  get: function get() {
-    return _character.diffChars;
-  }
-}));
-Object.defineProperty(exports, "diffWords", ({
-  enumerable: true,
-  get: function get() {
-    return _word.diffWords;
-  }
-}));
-Object.defineProperty(exports, "diffWordsWithSpace", ({
-  enumerable: true,
-  get: function get() {
-    return _word.diffWordsWithSpace;
-  }
-}));
-Object.defineProperty(exports, "diffLines", ({
-  enumerable: true,
-  get: function get() {
-    return _line.diffLines;
-  }
-}));
-Object.defineProperty(exports, "diffTrimmedLines", ({
-  enumerable: true,
-  get: function get() {
-    return _line.diffTrimmedLines;
-  }
-}));
-Object.defineProperty(exports, "diffSentences", ({
-  enumerable: true,
-  get: function get() {
-    return _sentence.diffSentences;
-  }
-}));
-Object.defineProperty(exports, "diffCss", ({
-  enumerable: true,
-  get: function get() {
-    return _css.diffCss;
-  }
-}));
-Object.defineProperty(exports, "diffJson", ({
-  enumerable: true,
-  get: function get() {
-    return _json.diffJson;
-  }
-}));
-Object.defineProperty(exports, "canonicalize", ({
-  enumerable: true,
-  get: function get() {
-    return _json.canonicalize;
-  }
-}));
-Object.defineProperty(exports, "diffArrays", ({
-  enumerable: true,
-  get: function get() {
-    return _array.diffArrays;
-  }
-}));
-Object.defineProperty(exports, "applyPatch", ({
-  enumerable: true,
-  get: function get() {
-    return _apply.applyPatch;
-  }
-}));
-Object.defineProperty(exports, "applyPatches", ({
-  enumerable: true,
-  get: function get() {
-    return _apply.applyPatches;
-  }
-}));
-Object.defineProperty(exports, "parsePatch", ({
-  enumerable: true,
-  get: function get() {
-    return _parse.parsePatch;
-  }
-}));
-Object.defineProperty(exports, "merge", ({
-  enumerable: true,
-  get: function get() {
-    return _merge.merge;
-  }
-}));
-Object.defineProperty(exports, "structuredPatch", ({
-  enumerable: true,
-  get: function get() {
-    return _create.structuredPatch;
-  }
-}));
-Object.defineProperty(exports, "createTwoFilesPatch", ({
-  enumerable: true,
-  get: function get() {
-    return _create.createTwoFilesPatch;
-  }
-}));
-Object.defineProperty(exports, "createPatch", ({
-  enumerable: true,
-  get: function get() {
-    return _create.createPatch;
-  }
-}));
-Object.defineProperty(exports, "convertChangesToDMP", ({
-  enumerable: true,
-  get: function get() {
-    return _dmp.convertChangesToDMP;
-  }
-}));
-Object.defineProperty(exports, "convertChangesToXML", ({
-  enumerable: true,
-  get: function get() {
-    return _xml.convertChangesToXML;
-  }
-}));
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_base = _interopRequireDefault(__nccwpck_require__(21653))
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_character = __nccwpck_require__(22081)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_word = __nccwpck_require__(46992)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_line = __nccwpck_require__(41591)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_sentence = __nccwpck_require__(33577)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_css = __nccwpck_require__(48941)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_json = __nccwpck_require__(86335)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_array = __nccwpck_require__(70546)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_apply = __nccwpck_require__(17429)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_parse = __nccwpck_require__(15870)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_merge = __nccwpck_require__(22640)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_create = __nccwpck_require__(64543)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_dmp = __nccwpck_require__(32859)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_xml = __nccwpck_require__(16982)
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uL3NyYy9pbmRleC5qcyJdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7OztBQWdCQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUNBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBQ0E7QUFBQTtBQUFBO0FBQUE7QUFBQTs7QUFDQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUNBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBRUE7QUFBQTtBQUFBO0FBQUE7QUFBQTs7QUFDQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUVBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBRUE7QUFBQTtBQUFBO0FBQUE7QUFBQTs7QUFDQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUNBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBQ0E7QUFBQTtBQUFBO0FBQUE7QUFBQTs7QUFFQTtBQUFBO0FBQUE7QUFBQTtBQUFBOztBQUNBO0FBQUE7QUFBQTtBQUFBO0FBQUEiLCJzb3VyY2VzQ29udGVudCI6WyIvKiBTZWUgTElDRU5TRSBmaWxlIGZvciB0ZXJtcyBvZiB1c2UgKi9cblxuLypcbiAqIFRleHQgZGlmZiBpbXBsZW1lbnRhdGlvbi5cbiAqXG4gKiBUaGlzIGxpYnJhcnkgc3VwcG9ydHMgdGhlIGZvbGxvd2luZyBBUElTOlxuICogSnNEaWZmLmRpZmZDaGFyczogQ2hhcmFjdGVyIGJ5IGNoYXJhY3RlciBkaWZmXG4gKiBKc0RpZmYuZGlmZldvcmRzOiBXb3JkIChhcyBkZWZpbmVkIGJ5IFxcYiByZWdleCkgZGlmZiB3aGljaCBpZ25vcmVzIHdoaXRlc3BhY2VcbiAqIEpzRGlmZi5kaWZmTGluZXM6IExpbmUgYmFzZWQgZGlmZlxuICpcbiAqIEpzRGlmZi5kaWZmQ3NzOiBEaWZmIHRhcmdldGVkIGF0IENTUyBjb250ZW50XG4gKlxuICogVGhlc2UgbWV0aG9kcyBhcmUgYmFzZWQgb24gdGhlIGltcGxlbWVudGF0aW9uIHByb3Bvc2VkIGluXG4gKiBcIkFuIE8oTkQpIERpZmZlcmVuY2UgQWxnb3JpdGhtIGFuZCBpdHMgVmFyaWF0aW9uc1wiIChNeWVycywgMTk4NikuXG4gKiBodHRwOi8vY2l0ZXNlZXJ4LmlzdC5wc3UuZWR1L3ZpZXdkb2Mvc3VtbWFyeT9kb2k9MTAuMS4xLjQuNjkyN1xuICovXG5pbXBvcnQgRGlmZiBmcm9tICcuL2RpZmYvYmFzZSc7XG5pbXBvcnQge2RpZmZDaGFyc30gZnJvbSAnLi9kaWZmL2NoYXJhY3Rlcic7XG5pbXBvcnQge2RpZmZXb3JkcywgZGlmZldvcmRzV2l0aFNwYWNlfSBmcm9tICcuL2RpZmYvd29yZCc7XG5pbXBvcnQge2RpZmZMaW5lcywgZGlmZlRyaW1tZWRMaW5lc30gZnJvbSAnLi9kaWZmL2xpbmUnO1xuaW1wb3J0IHtkaWZmU2VudGVuY2VzfSBmcm9tICcuL2RpZmYvc2VudGVuY2UnO1xuXG5pbXBvcnQge2RpZmZDc3N9IGZyb20gJy4vZGlmZi9jc3MnO1xuaW1wb3J0IHtkaWZmSnNvbiwgY2Fub25pY2FsaXplfSBmcm9tICcuL2RpZmYvanNvbic7XG5cbmltcG9ydCB7ZGlmZkFycmF5c30gZnJvbSAnLi9kaWZmL2FycmF5JztcblxuaW1wb3J0IHthcHBseVBhdGNoLCBhcHBseVBhdGNoZXN9IGZyb20gJy4vcGF0Y2gvYXBwbHknO1xuaW1wb3J0IHtwYXJzZVBhdGNofSBmcm9tICcuL3BhdGNoL3BhcnNlJztcbmltcG9ydCB7bWVyZ2V9IGZyb20gJy4vcGF0Y2gvbWVyZ2UnO1xuaW1wb3J0IHtzdHJ1Y3R1cmVkUGF0Y2gsIGNyZWF0ZVR3b0ZpbGVzUGF0Y2gsIGNyZWF0ZVBhdGNofSBmcm9tICcuL3BhdGNoL2NyZWF0ZSc7XG5cbmltcG9ydCB7Y29udmVydENoYW5nZXNUb0RNUH0gZnJvbSAnLi9jb252ZXJ0L2RtcCc7XG5pbXBvcnQge2NvbnZlcnRDaGFuZ2VzVG9YTUx9IGZyb20gJy4vY29udmVydC94bWwnO1xuXG5leHBvcnQge1xuICBEaWZmLFxuXG4gIGRpZmZDaGFycyxcbiAgZGlmZldvcmRzLFxuICBkaWZmV29yZHNXaXRoU3BhY2UsXG4gIGRpZmZMaW5lcyxcbiAgZGlmZlRyaW1tZWRMaW5lcyxcbiAgZGlmZlNlbnRlbmNlcyxcblxuICBkaWZmQ3NzLFxuICBkaWZmSnNvbixcblxuICBkaWZmQXJyYXlzLFxuXG4gIHN0cnVjdHVyZWRQYXRjaCxcbiAgY3JlYXRlVHdvRmlsZXNQYXRjaCxcbiAgY3JlYXRlUGF0Y2gsXG4gIGFwcGx5UGF0Y2gsXG4gIGFwcGx5UGF0Y2hlcyxcbiAgcGFyc2VQYXRjaCxcbiAgbWVyZ2UsXG4gIGNvbnZlcnRDaGFuZ2VzVG9ETVAsXG4gIGNvbnZlcnRDaGFuZ2VzVG9YTUwsXG4gIGNhbm9uaWNhbGl6ZVxufTtcbiJdfQ==
-
-
-/***/ }),
-
-/***/ 17429:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.applyPatch = applyPatch;
-exports.applyPatches = applyPatches;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_parse = __nccwpck_require__(15870)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_distanceIterator = _interopRequireDefault(__nccwpck_require__(75512))
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { "default": obj }; }
-
-/*istanbul ignore end*/
-function applyPatch(source, uniDiff) {
-  /*istanbul ignore start*/
-  var
-  /*istanbul ignore end*/
-  options = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
-
-  if (typeof uniDiff === 'string') {
-    uniDiff =
-    /*istanbul ignore start*/
-    (0,
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    _parse
-    /*istanbul ignore end*/
-    .
-    /*istanbul ignore start*/
-    parsePatch)
-    /*istanbul ignore end*/
-    (uniDiff);
-  }
-
-  if (Array.isArray(uniDiff)) {
-    if (uniDiff.length > 1) {
-      throw new Error('applyPatch only works with a single input.');
-    }
-
-    uniDiff = uniDiff[0];
-  } // Apply the diff to the input
-
-
-  var lines = source.split(/\r\n|[\n\v\f\r\x85]/),
-      delimiters = source.match(/\r\n|[\n\v\f\r\x85]/g) || [],
-      hunks = uniDiff.hunks,
-      compareLine = options.compareLine || function (lineNumber, line, operation, patchContent)
-  /*istanbul ignore start*/
-  {
-    return (
-      /*istanbul ignore end*/
-      line === patchContent
-    );
-  },
-      errorCount = 0,
-      fuzzFactor = options.fuzzFactor || 0,
-      minLine = 0,
-      offset = 0,
-      removeEOFNL,
-      addEOFNL;
-  /**
-   * Checks if the hunk exactly fits on the provided location
-   */
-
-
-  function hunkFits(hunk, toPos) {
-    for (var j = 0; j < hunk.lines.length; j++) {
-      var line = hunk.lines[j],
-          operation = line.length > 0 ? line[0] : ' ',
-          content = line.length > 0 ? line.substr(1) : line;
-
-      if (operation === ' ' || operation === '-') {
-        // Context sanity check
-        if (!compareLine(toPos + 1, lines[toPos], operation, content)) {
-          errorCount++;
-
-          if (errorCount > fuzzFactor) {
-            return false;
-          }
-        }
-
-        toPos++;
-      }
-    }
-
-    return true;
-  } // Search best fit offsets for each hunk based on the previous ones
-
-
-  for (var i = 0; i < hunks.length; i++) {
-    var hunk = hunks[i],
-        maxLine = lines.length - hunk.oldLines,
-        localOffset = 0,
-        toPos = offset + hunk.oldStart - 1;
-    var iterator =
-    /*istanbul ignore start*/
-    (0,
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    _distanceIterator
-    /*istanbul ignore end*/
-    [
-    /*istanbul ignore start*/
-    "default"
-    /*istanbul ignore end*/
-    ])(toPos, minLine, maxLine);
-
-    for (; localOffset !== undefined; localOffset = iterator()) {
-      if (hunkFits(hunk, toPos + localOffset)) {
-        hunk.offset = offset += localOffset;
-        break;
-      }
-    }
-
-    if (localOffset === undefined) {
-      return false;
-    } // Set lower text limit to end of the current hunk, so next ones don't try
-    // to fit over already patched text
-
-
-    minLine = hunk.offset + hunk.oldStart + hunk.oldLines;
-  } // Apply patch hunks
-
-
-  var diffOffset = 0;
-
-  for (var _i = 0; _i < hunks.length; _i++) {
-    var _hunk = hunks[_i],
-        _toPos = _hunk.oldStart + _hunk.offset + diffOffset - 1;
-
-    diffOffset += _hunk.newLines - _hunk.oldLines;
-
-    for (var j = 0; j < _hunk.lines.length; j++) {
-      var line = _hunk.lines[j],
-          operation = line.length > 0 ? line[0] : ' ',
-          content = line.length > 0 ? line.substr(1) : line,
-          delimiter = _hunk.linedelimiters[j];
-
-      if (operation === ' ') {
-        _toPos++;
-      } else if (operation === '-') {
-        lines.splice(_toPos, 1);
-        delimiters.splice(_toPos, 1);
-        /* istanbul ignore else */
-      } else if (operation === '+') {
-        lines.splice(_toPos, 0, content);
-        delimiters.splice(_toPos, 0, delimiter);
-        _toPos++;
-      } else if (operation === '\\') {
-        var previousOperation = _hunk.lines[j - 1] ? _hunk.lines[j - 1][0] : null;
-
-        if (previousOperation === '+') {
-          removeEOFNL = true;
-        } else if (previousOperation === '-') {
-          addEOFNL = true;
-        }
-      }
-    }
-  } // Handle EOFNL insertion/removal
-
-
-  if (removeEOFNL) {
-    while (!lines[lines.length - 1]) {
-      lines.pop();
-      delimiters.pop();
-    }
-  } else if (addEOFNL) {
-    lines.push('');
-    delimiters.push('\n');
-  }
-
-  for (var _k = 0; _k < lines.length - 1; _k++) {
-    lines[_k] = lines[_k] + delimiters[_k];
-  }
-
-  return lines.join('');
-} // Wrapper that supports multiple file patches via callbacks.
-
-
-function applyPatches(uniDiff, options) {
-  if (typeof uniDiff === 'string') {
-    uniDiff =
-    /*istanbul ignore start*/
-    (0,
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    _parse
-    /*istanbul ignore end*/
-    .
-    /*istanbul ignore start*/
-    parsePatch)
-    /*istanbul ignore end*/
-    (uniDiff);
-  }
-
-  var currentIndex = 0;
-
-  function processIndex() {
-    var index = uniDiff[currentIndex++];
-
-    if (!index) {
-      return options.complete();
-    }
-
-    options.loadFile(index, function (err, data) {
-      if (err) {
-        return options.complete(err);
-      }
-
-      var updatedContent = applyPatch(data, index, options);
-      options.patched(index, updatedContent, function (err) {
-        if (err) {
-          return options.complete(err);
-        }
-
-        processIndex();
-      });
-    });
-  }
-
-  processIndex();
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9wYXRjaC9hcHBseS5qcyJdLCJuYW1lcyI6WyJhcHBseVBhdGNoIiwic291cmNlIiwidW5pRGlmZiIsIm9wdGlvbnMiLCJwYXJzZVBhdGNoIiwiQXJyYXkiLCJpc0FycmF5IiwibGVuZ3RoIiwiRXJyb3IiLCJsaW5lcyIsInNwbGl0IiwiZGVsaW1pdGVycyIsIm1hdGNoIiwiaHVua3MiLCJjb21wYXJlTGluZSIsImxpbmVOdW1iZXIiLCJsaW5lIiwib3BlcmF0aW9uIiwicGF0Y2hDb250ZW50IiwiZXJyb3JDb3VudCIsImZ1enpGYWN0b3IiLCJtaW5MaW5lIiwib2Zmc2V0IiwicmVtb3ZlRU9GTkwiLCJhZGRFT0ZOTCIsImh1bmtGaXRzIiwiaHVuayIsInRvUG9zIiwiaiIsImNvbnRlbnQiLCJzdWJzdHIiLCJpIiwibWF4TGluZSIsIm9sZExpbmVzIiwibG9jYWxPZmZzZXQiLCJvbGRTdGFydCIsIml0ZXJhdG9yIiwiZGlzdGFuY2VJdGVyYXRvciIsInVuZGVmaW5lZCIsImRpZmZPZmZzZXQiLCJuZXdMaW5lcyIsImRlbGltaXRlciIsImxpbmVkZWxpbWl0ZXJzIiwic3BsaWNlIiwicHJldmlvdXNPcGVyYXRpb24iLCJwb3AiLCJwdXNoIiwiX2siLCJqb2luIiwiYXBwbHlQYXRjaGVzIiwiY3VycmVudEluZGV4IiwicHJvY2Vzc0luZGV4IiwiaW5kZXgiLCJjb21wbGV0ZSIsImxvYWRGaWxlIiwiZXJyIiwiZGF0YSIsInVwZGF0ZWRDb250ZW50IiwicGF0Y2hlZCJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7OztBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBQ0E7QUFBQTtBQUFBO0FBQUE7QUFBQTs7Ozs7QUFFTyxTQUFTQSxVQUFULENBQW9CQyxNQUFwQixFQUE0QkMsT0FBNUIsRUFBbUQ7QUFBQTtBQUFBO0FBQUE7QUFBZEMsRUFBQUEsT0FBYyx1RUFBSixFQUFJOztBQUN4RCxNQUFJLE9BQU9ELE9BQVAsS0FBbUIsUUFBdkIsRUFBaUM7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QUNEOztBQUVELE1BQUlnRCxZQUFZLEdBQUcsQ0FBbkI7O0FBQ0EsV0FBU0MsWUFBVCxHQUF3QjtBQUN0QixRQUFJQyxLQUFLLEdBQUdsRCxPQUFPLENBQUNnRCxZQUFZLEVBQWIsQ0FBbkI7O0FBQ0EsUUFBSSxDQUFDRSxLQUFMLEVBQVk7QUFDVixhQUFPakQsT0FBTyxDQUFDa0QsUUFBUixFQUFQO0FBQ0Q7O0FBRURsRCxJQUFBQSxPQUFPLENBQUNtRCxRQUFSLENBQWlCRixLQUFqQixFQUF3QixVQUFTRyxHQUFULEVBQWNDLElBQWQsRUFBb0I7QUFDMUMsVUFBSUQsR0FBSixFQUFTO0FBQ1AsZUFBT3BELE9BQU8sQ0FBQ2tELFFBQVIsQ0FBaUJFLEdBQWpCLENBQVA7QUFDRDs7QUFFRCxVQUFJRSxjQUFjLEdBQUd6RCxVQUFVLENBQUN3RCxJQUFELEVBQU9KLEtBQVAsRUFBY2pELE9BQWQsQ0FBL0I7QUFDQUEsTUFBQUEsT0FBTyxDQUFDdUQsT0FBUixDQUFnQk4sS0FBaEIsRUFBdUJLLGNBQXZCLEVBQXVDLFVBQVNGLEdBQVQsRUFBYztBQUNuRCxZQUFJQSxHQUFKLEVBQVM7QUFDUCxpQkFBT3BELE9BQU8sQ0FBQ2tELFFBQVIsQ0FBaUJFLEdBQWpCLENBQVA7QUFDRDs7QUFFREosUUFBQUEsWUFBWTtBQUNiLE9BTkQ7QUFPRCxLQWJEO0FBY0Q7O0FBQ0RBLEVBQUFBLFlBQVk7QUFDYiIsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7cGFyc2VQYXRjaH0gZnJvbSAnLi9wYXJzZSc7XG5pbXBvcnQgZGlzdGFuY2VJdGVyYXRvciBmcm9tICcuLi91dGlsL2Rpc3RhbmNlLWl0ZXJhdG9yJztcblxuZXhwb3J0IGZ1bmN0aW9uIGFwcGx5UGF0Y2goc291cmNlLCB1bmlEaWZmLCBvcHRpb25zID0ge30pIHtcbiAgaWYgKHR5cGVvZiB1bmlEaWZmID09PSAnc3RyaW5nJykge1xuICAgIHVuaURpZmYgPSBwYXJzZVBhdGNoKHVuaURpZmYpO1xuICB9XG5cbiAgaWYgKEFycmF5LmlzQXJyYXkodW5pRGlmZikpIHtcbiAgICBpZiAodW5pRGlmZi5sZW5ndGggPiAxKSB7XG4gICAgICB0aHJvdyBuZXcgRXJyb3IoJ2FwcGx5UGF0Y2ggb25seSB3b3JrcyB3aXRoIGEgc2luZ2xlIGlucHV0LicpO1xuICAgIH1cblxuICAgIHVuaURpZmYgPSB1bmlEaWZmWzBdO1xuICB9XG5cbiAgLy8gQXBwbHkgdGhlIGRpZmYgdG8gdGhlIGlucHV0XG4gIGxldCBsaW5lcyA9IHNvdXJjZS5zcGxpdCgvXFxyXFxufFtcXG5cXHZcXGZcXHJcXHg4NV0vKSxcbiAgICAgIGRlbGltaXRlcnMgPSBzb3VyY2UubWF0Y2goL1xcclxcbnxbXFxuXFx2XFxmXFxyXFx4ODVdL2cpIHx8IFtdLFxuICAgICAgaHVua3MgPSB1bmlEaWZmLmh1bmtzLFxuXG4gICAgICBjb21wYXJlTGluZSA9IG9wdGlvbnMuY29tcGFyZUxpbmUgfHwgKChsaW5lTnVtYmVyLCBsaW5lLCBvcGVyYXRpb24sIHBhdGNoQ29udGVudCkgPT4gbGluZSA9PT0gcGF0Y2hDb250ZW50KSxcbiAgICAgIGVycm9yQ291bnQgPSAwLFxuICAgICAgZnV6ekZhY3RvciA9IG9wdGlvbnMuZnV6ekZhY3RvciB8fCAwLFxuICAgICAgbWluTGluZSA9IDAsXG4gICAgICBvZmZzZXQgPSAwLFxuXG4gICAgICByZW1vdmVFT0ZOTCxcbiAgICAgIGFkZEVPRk5MO1xuXG4gIC8qKlxuICAgKiBDaGVja3MgaWYgdGhlIGh1bmsgZXhhY3RseSBmaXRzIG9uIHRoZSBwcm92aWRlZCBsb2NhdGlvblxuICAgKi9cbiAgZnVuY3Rpb24gaHVua0ZpdHMoaHVuaywgdG9Qb3MpIHtcbiAgICBmb3IgKGxldCBqID0gMDsgaiA8IGh1bmsubGluZXMubGVuZ3RoOyBqKyspIHtcbiAgICAgIGxldCBsaW5lID0gaHVuay5saW5lc1tqXSxcbiAgICAgICAgICBvcGVyYXRpb24gPSAobGluZS5sZW5ndGggPiAwID8gbGluZVswXSA6ICcgJyksXG4gICAgICAgICAgY29udGVudCA9IChsaW5lLmxlbmd0aCA+IDAgPyBsaW5lLnN1YnN0cigxKSA6IGxpbmUpO1xuXG4gICAgICBpZiAob3BlcmF0aW9uID09PSAnICcgfHwgb3BlcmF0aW9uID09PSAnLScpIHtcbiAgICAgICAgLy8gQ29udGV4dCBzYW5pdHkgY2hlY2tcbiAgICAgICAgaWYgKCFjb21wYXJlTGluZSh0b1BvcyArIDEsIGxpbmVzW3RvUG9zXSwgb3BlcmF0aW9uLCBjb250ZW50KSkge1xuICAgICAgICAgIGVycm9yQ291bnQrKztcblxuICAgICAgICAgIGlmIChlcnJvckNvdW50ID4gZnV6ekZhY3Rvcikge1xuICAgICAgICAgICAgcmV0dXJuIGZhbHNlO1xuICAgICAgICAgIH1cbiAgICAgICAgfVxuICAgICAgICB0b1BvcysrO1xuICAgICAgfVxuICAgIH1cblxuICAgIHJldHVybiB0cnVlO1xuICB9XG5cbiAgLy8gU2VhcmNoIGJlc3QgZml0IG9mZnNldHMgZm9yIGVhY2ggaHVuayBiYXNlZCBvbiB0aGUgcHJldmlvdXMgb25lc1xuICBmb3IgKGxldCBpID0gMDsgaSA8IGh1bmtzLmxlbmd0aDsgaSsrKSB7XG4gICAgbGV0IGh1bmsgPSBodW5rc1tpXSxcbiAgICAgICAgbWF4TGluZSA9IGxpbmVzLmxlbmd0aCAtIGh1bmsub2xkTGluZXMsXG4gICAgICAgIGxvY2FsT2Zmc2V0ID0gMCxcbiAgICAgICAgdG9Qb3MgPSBvZmZzZXQgKyBodW5rLm9sZFN0YXJ0IC0gMTtcblxuICAgIGxldCBpdGVyYXRvciA9IGRpc3RhbmNlSXRlcmF0b3IodG9Qb3MsIG1pbkxpbmUsIG1heExpbmUpO1xuXG4gICAgZm9yICg7IGxvY2FsT2Zmc2V0ICE9PSB1bmRlZmluZWQ7IGxvY2FsT2Zmc2V0ID0gaXRlcmF0b3IoKSkge1xuICAgICAgaWYgKGh1bmtGaXRzKGh1bmssIHRvUG9zICsgbG9jYWxPZmZzZXQpKSB7XG4gICAgICAgIGh1bmsub2Zmc2V0ID0gb2Zmc2V0ICs9IGxvY2FsT2Zmc2V0O1xuICAgICAgICBicmVhaztcbiAgICAgIH1cbiAgICB9XG5cbiAgICBpZiAobG9jYWxPZmZzZXQgPT09IHVuZGVmaW5lZCkge1xuICAgICAgcmV0dXJuIGZhbHNlO1xuICAgIH1cblxuICAgIC8vIFNldCBsb3dlciB0ZXh0IGxpbWl0IHRvIGVuZCBvZiB0aGUgY3VycmVudCBodW5rLCBzbyBuZXh0IG9uZXMgZG9uJ3QgdHJ5XG4gICAgLy8gdG8gZml0IG92ZXIgYWxyZWFkeSBwYXRjaGVkIHRleHRcbiAgICBtaW5MaW5lID0gaHVuay5vZmZzZXQgKyBodW5rLm9sZFN0YXJ0ICsgaHVuay5vbGRMaW5lcztcbiAgfVxuXG4gIC8vIEFwcGx5IHBhdGNoIGh1bmtzXG4gIGxldCBkaWZmT2Zmc2V0ID0gMDtcbiAgZm9yIChsZXQgaSA9IDA7IGkgPCBodW5rcy5sZW5ndGg7IGkrKykge1xuICAgIGxldCBodW5rID0gaHVua3NbaV0sXG4gICAgICAgIHRvUG9zID0gaHVuay5vbGRTdGFydCArIGh1bmsub2Zmc2V0ICsgZGlmZk9mZnNldCAtIDE7XG4gICAgZGlmZk9mZnNldCArPSBodW5rLm5ld0xpbmVzIC0gaHVuay5vbGRMaW5lcztcblxuICAgIGZvciAobGV0IGogPSAwOyBqIDwgaHVuay5saW5lcy5sZW5ndGg7IGorKykge1xuICAgICAgbGV0IGxpbmUgPSBodW5rLmxpbmVzW2pdLFxuICAgICAgICAgIG9wZXJhdGlvbiA9IChsaW5lLmxlbmd0aCA+IDAgPyBsaW5lWzBdIDogJyAnKSxcbiAgICAgICAgICBjb250ZW50ID0gKGxpbmUubGVuZ3RoID4gMCA/IGxpbmUuc3Vic3RyKDEpIDogbGluZSksXG4gICAgICAgICAgZGVsaW1pdGVyID0gaHVuay5saW5lZGVsaW1pdGVyc1tqXTtcblxuICAgICAgaWYgKG9wZXJhdGlvbiA9PT0gJyAnKSB7XG4gICAgICAgIHRvUG9zKys7XG4gICAgICB9IGVsc2UgaWYgKG9wZXJhdGlvbiA9PT0gJy0nKSB7XG4gICAgICAgIGxpbmVzLnNwbGljZSh0b1BvcywgMSk7XG4gICAgICAgIGRlbGltaXRlcnMuc3BsaWNlKHRvUG9zLCAxKTtcbiAgICAgIC8qIGlzdGFuYnVsIGlnbm9yZSBlbHNlICovXG4gICAgICB9IGVsc2UgaWYgKG9wZXJhdGlvbiA9PT0gJysnKSB7XG4gICAgICAgIGxpbmVzLnNwbGljZSh0b1BvcywgMCwgY29udGVudCk7XG4gICAgICAgIGRlbGltaXRlcnMuc3BsaWNlKHRvUG9zLCAwLCBkZWxpbWl0ZXIpO1xuICAgICAgICB0b1BvcysrO1xuICAgICAgfSBlbHNlIGlmIChvcGVyYXRpb24gPT09ICdcXFxcJykge1xuICAgICAgICBsZXQgcHJldmlvdXNPcGVyYXRpb24gPSBodW5rLmxpbmVzW2ogLSAxXSA/IGh1bmsubGluZXNbaiAtIDFdWzBdIDogbnVsbDtcbiAgICAgICAgaWYgKHByZXZpb3VzT3BlcmF0aW9uID09PSAnKycpIHtcbiAgICAgICAgICByZW1vdmVFT0ZOTCA9IHRydWU7XG4gICAgICAgIH0gZWxzZSBpZiAocHJldmlvdXNPcGVyYXRpb24gPT09ICctJykge1xuICAgICAgICAgIGFkZEVPRk5MID0gdHJ1ZTtcbiAgICAgICAgfVxuICAgICAgfVxuICAgIH1cbiAgfVxuXG4gIC8vIEhhbmRsZSBFT0ZOTCBpbnNlcnRpb24vcmVtb3ZhbFxuICBpZiAocmVtb3ZlRU9GTkwpIHtcbiAgICB3aGlsZSAoIWxpbmVzW2xpbmVzLmxlbmd0aCAtIDFdKSB7XG4gICAgICBsaW5lcy5wb3AoKTtcbiAgICAgIGRlbGltaXRlcnMucG9wKCk7XG4gICAgfVxuICB9IGVsc2UgaWYgKGFkZEVPRk5MKSB7XG4gICAgbGluZXMucHVzaCgnJyk7XG4gICAgZGVsaW1pdGVycy5wdXNoKCdcXG4nKTtcbiAgfVxuICBmb3IgKGxldCBfayA9IDA7IF9rIDwgbGluZXMubGVuZ3RoIC0gMTsgX2srKykge1xuICAgIGxpbmVzW19rXSA9IGxpbmVzW19rXSArIGRlbGltaXRlcnNbX2tdO1xuICB9XG4gIHJldHVybiBsaW5lcy5qb2luKCcnKTtcbn1cblxuLy8gV3JhcHBlciB0aGF0IHN1cHBvcnRzIG11bHRpcGxlIGZpbGUgcGF0Y2hlcyB2aWEgY2FsbGJhY2tzLlxuZXhwb3J0IGZ1bmN0aW9uIGFwcGx5UGF0Y2hlcyh1bmlEaWZmLCBvcHRpb25zKSB7XG4gIGlmICh0eXBlb2YgdW5pRGlmZiA9PT0gJ3N0cmluZycpIHtcbiAgICB1bmlEaWZmID0gcGFyc2VQYXRjaCh1bmlEaWZmKTtcbiAgfVxuXG4gIGxldCBjdXJyZW50SW5kZXggPSAwO1xuICBmdW5jdGlvbiBwcm9jZXNzSW5kZXgoKSB7XG4gICAgbGV0IGluZGV4ID0gdW5pRGlmZltjdXJyZW50SW5kZXgrK107XG4gICAgaWYgKCFpbmRleCkge1xuICAgICAgcmV0dXJuIG9wdGlvbnMuY29tcGxldGUoKTtcbiAgICB9XG5cbiAgICBvcHRpb25zLmxvYWRGaWxlKGluZGV4LCBmdW5jdGlvbihlcnIsIGRhdGEpIHtcbiAgICAgIGlmIChlcnIpIHtcbiAgICAgICAgcmV0dXJuIG9wdGlvbnMuY29tcGxldGUoZXJyKTtcbiAgICAgIH1cblxuICAgICAgbGV0IHVwZGF0ZWRDb250ZW50ID0gYXBwbHlQYXRjaChkYXRhLCBpbmRleCwgb3B0aW9ucyk7XG4gICAgICBvcHRpb25zLnBhdGNoZWQoaW5kZXgsIHVwZGF0ZWRDb250ZW50LCBmdW5jdGlvbihlcnIpIHtcbiAgICAgICAgaWYgKGVycikge1xuICAgICAgICAgIHJldHVybiBvcHRpb25zLmNvbXBsZXRlKGVycik7XG4gICAgICAgIH1cblxuICAgICAgICBwcm9jZXNzSW5kZXgoKTtcbiAgICAgIH0pO1xuICAgIH0pO1xuICB9XG4gIHByb2Nlc3NJbmRleCgpO1xufVxuIl19
-
-
-/***/ }),
-
-/***/ 64543:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.structuredPatch = structuredPatch;
-exports.formatPatch = formatPatch;
-exports.createTwoFilesPatch = createTwoFilesPatch;
-exports.createPatch = createPatch;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_line = __nccwpck_require__(41591)
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _toConsumableArray(arr) { return _arrayWithoutHoles(arr) || _iterableToArray(arr) || _unsupportedIterableToArray(arr) || _nonIterableSpread(); }
-
-function _nonIterableSpread() { throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
-
-function _unsupportedIterableToArray(o, minLen) { if (!o) return; if (typeof o === "string") return _arrayLikeToArray(o, minLen); var n = Object.prototype.toString.call(o).slice(8, -1); if (n === "Object" && o.constructor) n = o.constructor.name; if (n === "Map" || n === "Set") return Array.from(o); if (n === "Arguments" || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n)) return _arrayLikeToArray(o, minLen); }
-
-function _iterableToArray(iter) { if (typeof Symbol !== "undefined" && Symbol.iterator in Object(iter)) return Array.from(iter); }
-
-function _arrayWithoutHoles(arr) { if (Array.isArray(arr)) return _arrayLikeToArray(arr); }
-
-function _arrayLikeToArray(arr, len) { if (len == null || len > arr.length) len = arr.length; for (var i = 0, arr2 = new Array(len); i < len; i++) { arr2[i] = arr[i]; } return arr2; }
-
-/*istanbul ignore end*/
-function structuredPatch(oldFileName, newFileName, oldStr, newStr, oldHeader, newHeader, options) {
-  if (!options) {
-    options = {};
-  }
-
-  if (typeof options.context === 'undefined') {
-    options.context = 4;
-  }
-
-  var diff =
-  /*istanbul ignore start*/
-  (0,
-  /*istanbul ignore end*/
-
-  /*istanbul ignore start*/
-  _line
-  /*istanbul ignore end*/
-  .
-  /*istanbul ignore start*/
-  diffLines)
-  /*istanbul ignore end*/
-  (oldStr, newStr, options);
-  diff.push({
-    value: '',
-    lines: []
-  }); // Append an empty value to make cleanup easier
-
-  function contextLines(lines) {
-    return lines.map(function (entry) {
-      return ' ' + entry;
-    });
-  }
-
-  var hunks = [];
-  var oldRangeStart = 0,
-      newRangeStart = 0,
-      curRange = [],
-      oldLine = 1,
-      newLine = 1;
-
-  /*istanbul ignore start*/
-  var _loop = function _loop(
-  /*istanbul ignore end*/
-  i) {
-    var current = diff[i],
-        lines = current.lines || current.value.replace(/\n$/, '').split('\n');
-    current.lines = lines;
-
-    if (current.added || current.removed) {
-      /*istanbul ignore start*/
-      var _curRange;
-
-      /*istanbul ignore end*/
-      // If we have previous context, start with that
-      if (!oldRangeStart) {
-        var prev = diff[i - 1];
-        oldRangeStart = oldLine;
-        newRangeStart = newLine;
-
-        if (prev) {
-          curRange = options.context > 0 ? contextLines(prev.lines.slice(-options.context)) : [];
-          oldRangeStart -= curRange.length;
-          newRangeStart -= curRange.length;
-        }
-      } // Output our changes
-
-
-      /*istanbul ignore start*/
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-      (_curRange =
-      /*istanbul ignore end*/
-      curRange).push.apply(
-      /*istanbul ignore start*/
-      _curRange
-      /*istanbul ignore end*/
-      ,
-      /*istanbul ignore start*/
-      _toConsumableArray(
-      /*istanbul ignore end*/
-      lines.map(function (entry) {
-        return (current.added ? '+' : '-') + entry;
-      }))); // Track the updated file position
-
-
-      if (current.added) {
-        newLine += lines.length;
-      } else {
-        oldLine += lines.length;
-      }
-    } else {
-      // Identical context lines. Track line changes
-      if (oldRangeStart) {
-        // Close out any changes that have been output (or join overlapping)
-        if (lines.length <= options.context * 2 && i < diff.length - 2) {
-          /*istanbul ignore start*/
-          var _curRange2;
-
-          /*istanbul ignore end*/
-          // Overlapping
-
-          /*istanbul ignore start*/
-
-          /*istanbul ignore end*/
-
-          /*istanbul ignore start*/
-          (_curRange2 =
-          /*istanbul ignore end*/
-          curRange).push.apply(
-          /*istanbul ignore start*/
-          _curRange2
-          /*istanbul ignore end*/
-          ,
-          /*istanbul ignore start*/
-          _toConsumableArray(
-          /*istanbul ignore end*/
-          contextLines(lines)));
-        } else {
-          /*istanbul ignore start*/
-          var _curRange3;
-
-          /*istanbul ignore end*/
-          // end the range and output
-          var contextSize = Math.min(lines.length, options.context);
-
-          /*istanbul ignore start*/
-
-          /*istanbul ignore end*/
-
-          /*istanbul ignore start*/
-          (_curRange3 =
-          /*istanbul ignore end*/
-          curRange).push.apply(
-          /*istanbul ignore start*/
-          _curRange3
-          /*istanbul ignore end*/
-          ,
-          /*istanbul ignore start*/
-          _toConsumableArray(
-          /*istanbul ignore end*/
-          contextLines(lines.slice(0, contextSize))));
-
-          var hunk = {
-            oldStart: oldRangeStart,
-            oldLines: oldLine - oldRangeStart + contextSize,
-            newStart: newRangeStart,
-            newLines: newLine - newRangeStart + contextSize,
-            lines: curRange
-          };
-
-          if (i >= diff.length - 2 && lines.length <= options.context) {
-            // EOF is inside this hunk
-            var oldEOFNewline = /\n$/.test(oldStr);
-            var newEOFNewline = /\n$/.test(newStr);
-            var noNlBeforeAdds = lines.length == 0 && curRange.length > hunk.oldLines;
-
-            if (!oldEOFNewline && noNlBeforeAdds && oldStr.length > 0) {
-              // special case: old has no eol and no trailing context; no-nl can end up before adds
-              // however, if the old file is empty, do not output the no-nl line
-              curRange.splice(hunk.oldLines, 0, '\\ No newline at end of file');
-            }
-
-            if (!oldEOFNewline && !noNlBeforeAdds || !newEOFNewline) {
-              curRange.push('\\ No newline at end of file');
-            }
-          }
-
-          hunks.push(hunk);
-          oldRangeStart = 0;
-          newRangeStart = 0;
-          curRange = [];
-        }
-      }
-
-      oldLine += lines.length;
-      newLine += lines.length;
-    }
-  };
-
-  for (var i = 0; i < diff.length; i++) {
-    /*istanbul ignore start*/
-    _loop(
-    /*istanbul ignore end*/
-    i);
-  }
-
-  return {
-    oldFileName: oldFileName,
-    newFileName: newFileName,
-    oldHeader: oldHeader,
-    newHeader: newHeader,
-    hunks: hunks
-  };
-}
-
-function formatPatch(diff) {
-  var ret = [];
-
-  if (diff.oldFileName == diff.newFileName) {
-    ret.push('Index: ' + diff.oldFileName);
-  }
-
-  ret.push('===================================================================');
-  ret.push('--- ' + diff.oldFileName + (typeof diff.oldHeader === 'undefined' ? '' : '\t' + diff.oldHeader));
-  ret.push('+++ ' + diff.newFileName + (typeof diff.newHeader === 'undefined' ? '' : '\t' + diff.newHeader));
-
-  for (var i = 0; i < diff.hunks.length; i++) {
-    var hunk = diff.hunks[i]; // Unified Diff Format quirk: If the chunk size is 0,
-    // the first number is one lower than one would expect.
-    // https://www.artima.com/weblogs/viewpost.jsp?thread=164293
-
-    if (hunk.oldLines === 0) {
-      hunk.oldStart -= 1;
-    }
-
-    if (hunk.newLines === 0) {
-      hunk.newStart -= 1;
-    }
-
-    ret.push('@@ -' + hunk.oldStart + ',' + hunk.oldLines + ' +' + hunk.newStart + ',' + hunk.newLines + ' @@');
-    ret.push.apply(ret, hunk.lines);
-  }
-
-  return ret.join('\n') + '\n';
-}
-
-function createTwoFilesPatch(oldFileName, newFileName, oldStr, newStr, oldHeader, newHeader, options) {
-  return formatPatch(structuredPatch(oldFileName, newFileName, oldStr, newStr, oldHeader, newHeader, options));
-}
-
-function createPatch(fileName, oldStr, newStr, oldHeader, newHeader, options) {
-  return createTwoFilesPatch(fileName, fileName, oldStr, newStr, oldHeader, newHeader, options);
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9wYXRjaC9jcmVhdGUuanMiXSwibmFtZXMiOlsic3RydWN0dXJlZFBhdGNoIiwib2xkRmlsZU5hbWUiLCJuZXdGaWxlTmFtZSIsIm9sZFN0ciIsIm5ld1N0ciIsIm9sZEhlYWRlciIsIm5ld0hlYWRlciIsIm9wdGlvbnMiLCJjb250ZXh0IiwiZGlmZiIsImRpZmZMaW5lcyIsInB1c2giLCJ2YWx1ZSIsImxpbmVzIiwiY29udGV4dExpbmVzIiwibWFwIiwiZW50cnkiLCJodW5rcyIsIm9sZFJhbmdlU3RhcnQiLCJuZXdSYW5nZVN0YXJ0IiwiY3VyUmFuZ2UiLCJvbGRMaW5lIiwibmV3TGluZSIsImkiLCJjdXJyZW50IiwicmVwbGFjZSIsInNwbGl0IiwiYWRkZWQiLCJyZW1vdmVkIiwicHJldiIsInNsaWNlIiwibGVuZ3RoIiwiY29udGV4dFNpemUiLCJNYXRoIiwibWluIiwiaHVuayIsIm9sZFN0YXJ0Iiwib2xkTGluZXMiLCJuZXdTdGFydCIsIm5ld0xpbmVzIiwib2xkRU9GTmV3bGluZSIsInRlc3QiLCJuZXdFT0ZOZXdsaW5lIiwibm9ObEJlZm9yZUFkZHMiLCJzcGxpY2UiLCJmb3JtYXRQYXRjaCIsInJldCIsImFwcGx5Iiwiam9pbiIsImNyZWF0ZVR3b0ZpbGVzUGF0Y2giLCJjcmVhdGVQYXRjaCIsImZpbGVOYW1lIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7Ozs7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBOzs7Ozs7Ozs7Ozs7Ozs7QUFFTyxTQUFTQSxlQUFULENBQXlCQyxXQUF6QixFQUFzQ0MsV0FBdEMsRUFBbURDLE1BQW5ELEVBQTJEQyxNQUEzRCxFQUFtRUMsU0FBbkUsRUFBOEVDLFNBQTlFLEVBQXlGQyxPQUF6RixFQUFrRztBQUN2RyxNQUFJLENBQUNBLE9BQUwsRUFBYztBQUNaQSxJQUFBQSxPQUFPLEdBQUcsRUFBVjtBQUNEOztBQUNELE1BQUksT0FBT0EsT0FBTyxDQUFDQyxPQUFmLEtBQTJCLFdBQS9CLEVBQTRDO0FB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eHBvcnQgZnVuY3Rpb24gc3RydWN0dXJlZFBhdGNoKG9sZEZpbGVOYW1lLCBuZXdGaWxlTmFtZSwgb2xkU3RyLCBuZXdTdHIsIG9sZEhlYWRlciwgbmV3SGVhZGVyLCBvcHRpb25zKSB7XG4gIGlmICghb3B0aW9ucykge1xuICAgIG9wdGlvbnMgPSB7fTtcbiAgfVxuICBpZiAodHlwZW9mIG9wdGlvbnMuY29udGV4dCA9PT0gJ3VuZGVmaW5lZCcpIHtcbiAgICBvcHRpb25zLmNvbnRleHQgPSA0O1xuICB9XG5cbiAgY29uc3QgZGlmZiA9IGRpZmZMaW5lcyhvbGRTdHIsIG5ld1N0ciwgb3B0aW9ucyk7XG4gIGRpZmYucHVzaCh7dmFsdWU6ICcnLCBsaW5lczogW119KTsgLy8gQXBwZW5kIGFuIGVtcHR5IHZhbHVlIHRvIG1ha2UgY2xlYW51cCBlYXNpZXJcblxuICBmdW5jdGlvbiBjb250ZXh0TGluZXMobGluZXMpIHtcbiAgICByZXR1cm4gbGluZXMubWFwKGZ1bmN0aW9uKGVudHJ5KSB7IHJldHVybiAnICcgKyBlbnRyeTsgfSk7XG4gIH1cblxuICBsZXQgaHVua3MgPSBbXTtcbiAgbGV0IG9sZFJhbmdlU3RhcnQgPSAwLCBuZXdSYW5nZVN0YXJ0ID0gMCwgY3VyUmFuZ2UgPSBbXSxcbiAgICAgIG9sZExpbmUgPSAxLCBuZXdMaW5lID0gMTtcbiAgZm9yIChsZXQgaSA9IDA7IGkgPCBkaWZmLmxlbmd0aDsgaSsrKSB7XG4gICAgY29uc3QgY3VycmVudCA9IGRpZmZbaV0sXG4gICAgICAgICAgbGluZXMgPSBjdXJyZW50LmxpbmVzIHx8IGN1cnJlbnQudmFsdWUucmVwbGFjZSgvXFxuJC8sICcnKS5zcGxpdCgnXFxuJyk7XG4gICAgY3VycmVudC5saW5lcyA9IGxpbmVzO1xuXG4gICAgaWYgKGN1cnJlbnQuYWRkZWQgfHwgY3VycmVudC5yZW1vdmVkKSB7XG4gICAgICAvLyBJZiB3ZSBoYXZlIHByZXZpb3VzIGNvbnRleHQsIHN0YXJ0IHdpdGggdGhhdFxuICAgICAgaWYgKCFvbGRSYW5nZVN0YXJ0KSB7XG4gICAgICAgIGNvbnN0IHByZXYgPSBkaWZmW2kgLSAxXTtcbiAgICAgICAgb2xkUmFuZ2VTdGFydCA9IG9sZExpbmU7XG4gICAgICAgIG5ld1JhbmdlU3RhcnQgPSBuZXdMaW5lO1xuXG4gICAgICAgIGlmIChwcmV2KSB7XG4gICAgICAgICAgY3VyUmFuZ2UgPSBvcHRpb25zLmNvbnRleHQgPiAwID8gY29udGV4dExpbmVzKHByZXYubGluZXMuc2xpY2UoLW9wdGlvbnMuY29udGV4dCkpIDogW107XG4gICAgICAgICAgb2xkUmFuZ2VTdGFydCAtPSBjdXJSYW5nZS5sZW5ndGg7XG4gICAgICAgICAgbmV3UmFuZ2VTdGFydCAtPSBjdXJSYW5nZS5sZW5ndGg7XG4gICAgICAgIH1cbiAgICAgIH1cblxuICAgICAgLy8gT3V0cHV0IG91ciBjaGFuZ2VzXG4gICAgICBjdXJSYW5nZS5wdXNoKC4uLiBsaW5lcy5tYXAoZnVuY3Rpb24oZW50cnkpIHtcbiAgICAgICAgcmV0dXJuIChjdXJyZW50LmFkZGVkID8gJysnIDogJy0nKSArIGVudHJ5O1xuICAgICAgfSkpO1xuXG4gICAgICAvLyBUcmFjayB0aGUgdXBkYXRlZCBmaWxlIHBvc2l0aW9uXG4gICAgICBpZiAoY3VycmVudC5hZGRlZCkge1xuICAgICAgICBuZXdMaW5lICs9IGxpbmVzLmxlbmd0aDtcbiAgICAgIH0gZWxzZSB7XG4gICAgICAgIG9sZExpbmUgKz0gbGluZXMubGVuZ3RoO1xuICAgICAgfVxuICAgIH0gZWxzZSB7XG4gICAgICAvLyBJZGVudGljYWwgY29udGV4dCBsaW5lcy4gVHJhY2sgbGluZSBjaGFuZ2VzXG4gICAgICBpZiAob2xkUmFuZ2VTdGFydCkge1xuICAgICAgICAvLyBDbG9zZSBvdXQgYW55IGNoYW5nZXMgdGhhdCBoYXZlIGJlZW4gb3V0cHV0IChvciBqb2luIG92ZXJsYXBwaW5nKVxuICAgICAgICBpZiAobGluZXMubGVuZ3RoIDw9IG9wdGlvbnMuY29udGV4dCAqIDIgJiYgaSA8IGRpZmYubGVuZ3RoIC0gMikge1xuICAgICAgICAgIC8vIE92ZXJsYXBwaW5nXG4gICAgICAgICAgY3VyUmFuZ2UucHVzaCguLi4gY29udGV4dExpbmVzKGxpbmVzKSk7XG4gICAgICAgIH0gZWxzZSB7XG4gICAgICAgICAgLy8gZW5kIHRoZSByYW5nZSBhbmQgb3V0cHV0XG4gICAgICAgICAgbGV0IGNvbnRleHRTaXplID0gTWF0aC5taW4obGluZXMubGVuZ3RoLCBvcHRpb25zLmNvbnRleHQpO1xuICAgICAgICAgIGN1clJhbmdlLnB1c2goLi4uIGNvbnRleHRMaW5lcyhsaW5lcy5zbGljZSgwLCBjb250ZXh0U2l6ZSkpKTtcblxuICAgICAgICAgIGxldCBodW5rID0ge1xuICAgICAgICAgICAgb2xkU3RhcnQ6IG9sZFJhbmdlU3RhcnQsXG4gICAgICAgICAgICBvbGRMaW5lczogKG9sZExpbmUgLSBvbGRSYW5nZVN0YXJ0ICsgY29udGV4dFNpemUpLFxuICAgICAgICAgICAgbmV3U3RhcnQ6IG5ld1JhbmdlU3RhcnQsXG4gICAgICAgICAgICBuZXdMaW5lczogKG5ld0xpbmUgLSBuZXdSYW5nZVN0YXJ0ICsgY29udGV4dFNpemUpLFxuICAgICAgICAgICAgbGluZXM6IGN1clJhbmdlXG4gICAgICAgICAgfTtcbiAgICAgICAgICBpZiAoaSA+PSBkaWZmLmxlbmd0aCAtIDIgJiYgbGluZXMubGVuZ3RoIDw9IG9wdGlvbnMuY29udGV4dCkge1xuICAgICAgICAgICAgLy8gRU9GIGlzIGluc2lkZSB0aGlzIGh1bmtcbiAgICAgICAgICAgIGxldCBvbGRFT0ZOZXdsaW5lID0gKCgvXFxuJC8pLnRlc3Qob2xkU3RyKSk7XG4gICAgICAgICAgICBsZXQgbmV3RU9GTmV3bGluZSA9ICgoL1xcbiQvKS50ZXN0KG5ld1N0cikpO1xuICAgICAgICAgICAgbGV0IG5vTmxCZWZvcmVBZGRzID0gbGluZXMubGVuZ3RoID09IDAgJiYgY3VyUmFuZ2UubGVuZ3RoID4gaHVuay5vbGRMaW5lcztcbiAgICAgICAgICAgIGlmICghb2xkRU9GTmV3bGluZSAmJiBub05sQmVmb3JlQWRkcyAmJiBvbGRTdHIubGVuZ3RoID4gMCkge1xuICAgICAgICAgICAgICAvLyBzcGVjaWFsIGNhc2U6IG9sZCBoYXMgbm8gZW9sIGFuZCBubyB0cmFpbGluZyBjb250ZXh0OyBuby1ubCBjYW4gZW5kIHVwIGJlZm9yZSBhZGRzXG4gICAgICAgICAgICAgIC8vIGhvd2V2ZXIsIGlmIHRoZSBvbGQgZmlsZSBpcyBlbXB0eSwgZG8gbm90IG91dHB1dCB0aGUgbm8tbmwgbGluZVxuICAgICAgICAgICAgICBjdXJSYW5nZS5zcGxpY2UoaHVuay5vbGRMaW5lcywgMCwgJ1xcXFwgTm8gbmV3bGluZSBhdCBlbmQgb2YgZmlsZScpO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgaWYgKCghb2xkRU9GTmV3bGluZSAmJiAhbm9ObEJlZm9yZUFkZHMpIHx8ICFuZXdFT0ZOZXdsaW5lKSB7XG4gICAgICAgICAgICAgIGN1clJhbmdlLnB1c2goJ1xcXFwgTm8gbmV3bGluZSBhdCBlbmQgb2YgZmlsZScpO1xuICAgICAgICAgICAgfVxuICAgICAgICAgIH1cbiAgICAgICAgICBodW5rcy5wdXNoKGh1bmspO1xuXG4gICAgICAgICAgb2xkUmFuZ2VTdGFydCA9IDA7XG4gICAgICAgICAgbmV3UmFuZ2VTdGFydCA9IDA7XG4gICAgICAgICAgY3VyUmFuZ2UgPSBbXTtcbiAgICAgICAgfVxuICAgICAgfVxuICAgICAgb2xkTGluZSArPSBsaW5lcy5sZW5ndGg7XG4gICAgICBuZXdMaW5lICs9IGxpbmVzLmxlbmd0aDtcbiAgICB9XG4gIH1cblxuICByZXR1cm4ge1xuICAgIG9sZEZpbGVOYW1lOiBvbGRGaWxlTmFtZSwgbmV3RmlsZU5hbWU6IG5ld0ZpbGVOYW1lLFxuICAgIG9sZEhlYWRlcjogb2xkSGVhZGVyLCBuZXdIZWFkZXI6IG5ld0hlYWRlcixcbiAgICBodW5rczogaHVua3NcbiAgfTtcbn1cblxuZXhwb3J0IGZ1bmN0aW9uIGZvcm1hdFBhdGNoKGRpZmYpIHtcbiAgY29uc3QgcmV0ID0gW107XG4gIGlmIChkaWZmLm9sZEZpbGVOYW1lID09IGRpZmYubmV3RmlsZU5hbWUpIHtcbiAgICByZXQucHVzaCgnSW5kZXg6ICcgKyBkaWZmLm9sZEZpbGVOYW1lKTtcbiAgfVxuICByZXQucHVzaCgnPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PScpO1xuICByZXQucHVzaCgnLS0tICcgKyBkaWZmLm9sZEZpbGVOYW1lICsgKHR5cGVvZiBkaWZmLm9sZEhlYWRlciA9PT0gJ3VuZGVmaW5lZCcgPyAnJyA6ICdcXHQnICsgZGlmZi5vbGRIZWFkZXIpKTtcbiAgcmV0LnB1c2goJysrKyAnICsgZGlmZi5uZXdGaWxlTmFtZSArICh0eXBlb2YgZGlmZi5uZXdIZWFkZXIgPT09ICd1bmRlZmluZWQnID8gJycgOiAnXFx0JyArIGRpZmYubmV3SGVhZGVyKSk7XG5cbiAgZm9yIChsZXQgaSA9IDA7IGkgPCBkaWZmLmh1bmtzLmxlbmd0aDsgaSsrKSB7XG4gICAgY29uc3QgaHVuayA9IGRpZmYuaHVua3NbaV07XG4gICAgLy8gVW5pZmllZCBEaWZmIEZvcm1hdCBxdWlyazogSWYgdGhlIGNodW5rIHNpemUgaXMgMCxcbiAgICAvLyB0aGUgZmlyc3QgbnVtYmVyIGlzIG9uZSBsb3dlciB0aGFuIG9uZSB3b3VsZCBleHBlY3QuXG4gICAgLy8gaHR0cHM6Ly93d3cuYXJ0aW1hLmNvbS93ZWJsb2dzL3ZpZXdwb3N0LmpzcD90aHJlYWQ9MTY0MjkzXG4gICAgaWYgKGh1bmsub2xkTGluZXMgPT09IDApIHtcbiAgICAgIGh1bmsub2xkU3RhcnQgLT0gMTtcbiAgICB9XG4gICAgaWYgKGh1bmsubmV3TGluZXMgPT09IDApIHtcbiAgICAgIGh1bmsubmV3U3RhcnQgLT0gMTtcbiAgICB9XG4gICAgcmV0LnB1c2goXG4gICAgICAnQEAgLScgKyBodW5rLm9sZFN0YXJ0ICsgJywnICsgaHVuay5vbGRMaW5lc1xuICAgICAgKyAnICsnICsgaHVuay5uZXdTdGFydCArICcsJyArIGh1bmsubmV3TGluZXNcbiAgICAgICsgJyBAQCdcbiAgICApO1xuICAgIHJldC5wdXNoLmFwcGx5KHJldCwgaHVuay5saW5lcyk7XG4gIH1cblxuICByZXR1cm4gcmV0LmpvaW4oJ1xcbicpICsgJ1xcbic7XG59XG5cbmV4cG9ydCBmdW5jdGlvbiBjcmVhdGVUd29GaWxlc1BhdGNoKG9sZEZpbGVOYW1lLCBuZXdGaWxlTmFtZSwgb2xkU3RyLCBuZXdTdHIsIG9sZEhlYWRlciwgbmV3SGVhZGVyLCBvcHRpb25zKSB7XG4gIHJldHVybiBmb3JtYXRQYXRjaChzdHJ1Y3R1cmVkUGF0Y2gob2xkRmlsZU5hbWUsIG5ld0ZpbGVOYW1lLCBvbGRTdHIsIG5ld1N0ciwgb2xkSGVhZGVyLCBuZXdIZWFkZXIsIG9wdGlvbnMpKTtcbn1cblxuZXhwb3J0IGZ1bmN0aW9uIGNyZWF0ZVBhdGNoKGZpbGVOYW1lLCBvbGRTdHIsIG5ld1N0ciwgb2xkSGVhZGVyLCBuZXdIZWFkZXIsIG9wdGlvbnMpIHtcbiAgcmV0dXJuIGNyZWF0ZVR3b0ZpbGVzUGF0Y2goZmlsZU5hbWUsIGZpbGVOYW1lLCBvbGRTdHIsIG5ld1N0ciwgb2xkSGVhZGVyLCBuZXdIZWFkZXIsIG9wdGlvbnMpO1xufVxuIl19
-
-
-/***/ }),
-
-/***/ 22640:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.calcLineCount = calcLineCount;
-exports.merge = merge;
-
-/*istanbul ignore end*/
-var
-/*istanbul ignore start*/
-_create = __nccwpck_require__(64543)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_parse = __nccwpck_require__(15870)
-/*istanbul ignore end*/
-;
-
-var
-/*istanbul ignore start*/
-_array = __nccwpck_require__(78935)
-/*istanbul ignore end*/
-;
-
-/*istanbul ignore start*/ function _toConsumableArray(arr) { return _arrayWithoutHoles(arr) || _iterableToArray(arr) || _unsupportedIterableToArray(arr) || _nonIterableSpread(); }
-
-function _nonIterableSpread() { throw new TypeError("Invalid attempt to spread non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method."); }
-
-function _unsupportedIterableToArray(o, minLen) { if (!o) return; if (typeof o === "string") return _arrayLikeToArray(o, minLen); var n = Object.prototype.toString.call(o).slice(8, -1); if (n === "Object" && o.constructor) n = o.constructor.name; if (n === "Map" || n === "Set") return Array.from(o); if (n === "Arguments" || /^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n)) return _arrayLikeToArray(o, minLen); }
-
-function _iterableToArray(iter) { if (typeof Symbol !== "undefined" && Symbol.iterator in Object(iter)) return Array.from(iter); }
-
-function _arrayWithoutHoles(arr) { if (Array.isArray(arr)) return _arrayLikeToArray(arr); }
-
-function _arrayLikeToArray(arr, len) { if (len == null || len > arr.length) len = arr.length; for (var i = 0, arr2 = new Array(len); i < len; i++) { arr2[i] = arr[i]; } return arr2; }
-
-/*istanbul ignore end*/
-function calcLineCount(hunk) {
-  /*istanbul ignore start*/
-  var _calcOldNewLineCount =
-  /*istanbul ignore end*/
-  calcOldNewLineCount(hunk.lines),
-      oldLines = _calcOldNewLineCount.oldLines,
-      newLines = _calcOldNewLineCount.newLines;
-
-  if (oldLines !== undefined) {
-    hunk.oldLines = oldLines;
-  } else {
-    delete hunk.oldLines;
-  }
-
-  if (newLines !== undefined) {
-    hunk.newLines = newLines;
-  } else {
-    delete hunk.newLines;
-  }
-}
-
-function merge(mine, theirs, base) {
-  mine = loadPatch(mine, base);
-  theirs = loadPatch(theirs, base);
-  var ret = {}; // For index we just let it pass through as it doesn't have any necessary meaning.
-  // Leaving sanity checks on this to the API consumer that may know more about the
-  // meaning in their own context.
-
-  if (mine.index || theirs.index) {
-    ret.index = mine.index || theirs.index;
-  }
-
-  if (mine.newFileName || theirs.newFileName) {
-    if (!fileNameChanged(mine)) {
-      // No header or no change in ours, use theirs (and ours if theirs does not exist)
-      ret.oldFileName = theirs.oldFileName || mine.oldFileName;
-      ret.newFileName = theirs.newFileName || mine.newFileName;
-      ret.oldHeader = theirs.oldHeader || mine.oldHeader;
-      ret.newHeader = theirs.newHeader || mine.newHeader;
-    } else if (!fileNameChanged(theirs)) {
-      // No header or no change in theirs, use ours
-      ret.oldFileName = mine.oldFileName;
-      ret.newFileName = mine.newFileName;
-      ret.oldHeader = mine.oldHeader;
-      ret.newHeader = mine.newHeader;
-    } else {
-      // Both changed... figure it out
-      ret.oldFileName = selectField(ret, mine.oldFileName, theirs.oldFileName);
-      ret.newFileName = selectField(ret, mine.newFileName, theirs.newFileName);
-      ret.oldHeader = selectField(ret, mine.oldHeader, theirs.oldHeader);
-      ret.newHeader = selectField(ret, mine.newHeader, theirs.newHeader);
-    }
-  }
-
-  ret.hunks = [];
-  var mineIndex = 0,
-      theirsIndex = 0,
-      mineOffset = 0,
-      theirsOffset = 0;
-
-  while (mineIndex < mine.hunks.length || theirsIndex < theirs.hunks.length) {
-    var mineCurrent = mine.hunks[mineIndex] || {
-      oldStart: Infinity
-    },
-        theirsCurrent = theirs.hunks[theirsIndex] || {
-      oldStart: Infinity
-    };
-
-    if (hunkBefore(mineCurrent, theirsCurrent)) {
-      // This patch does not overlap with any of the others, yay.
-      ret.hunks.push(cloneHunk(mineCurrent, mineOffset));
-      mineIndex++;
-      theirsOffset += mineCurrent.newLines - mineCurrent.oldLines;
-    } else if (hunkBefore(theirsCurrent, mineCurrent)) {
-      // This patch does not overlap with any of the others, yay.
-      ret.hunks.push(cloneHunk(theirsCurrent, theirsOffset));
-      theirsIndex++;
-      mineOffset += theirsCurrent.newLines - theirsCurrent.oldLines;
-    } else {
-      // Overlap, merge as best we can
-      var mergedHunk = {
-        oldStart: Math.min(mineCurrent.oldStart, theirsCurrent.oldStart),
-        oldLines: 0,
-        newStart: Math.min(mineCurrent.newStart + mineOffset, theirsCurrent.oldStart + theirsOffset),
-        newLines: 0,
-        lines: []
-      };
-      mergeLines(mergedHunk, mineCurrent.oldStart, mineCurrent.lines, theirsCurrent.oldStart, theirsCurrent.lines);
-      theirsIndex++;
-      mineIndex++;
-      ret.hunks.push(mergedHunk);
-    }
-  }
-
-  return ret;
-}
-
-function loadPatch(param, base) {
-  if (typeof param === 'string') {
-    if (/^@@/m.test(param) || /^Index:/m.test(param)) {
-      return (
-        /*istanbul ignore start*/
-        (0,
-        /*istanbul ignore end*/
-
-        /*istanbul ignore start*/
-        _parse
-        /*istanbul ignore end*/
-        .
-        /*istanbul ignore start*/
-        parsePatch)
-        /*istanbul ignore end*/
-        (param)[0]
-      );
-    }
-
-    if (!base) {
-      throw new Error('Must provide a base reference or pass in a patch');
-    }
-
-    return (
-      /*istanbul ignore start*/
-      (0,
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-      _create
-      /*istanbul ignore end*/
-      .
-      /*istanbul ignore start*/
-      structuredPatch)
-      /*istanbul ignore end*/
-      (undefined, undefined, base, param)
-    );
-  }
-
-  return param;
-}
-
-function fileNameChanged(patch) {
-  return patch.newFileName && patch.newFileName !== patch.oldFileName;
-}
-
-function selectField(index, mine, theirs) {
-  if (mine === theirs) {
-    return mine;
-  } else {
-    index.conflict = true;
-    return {
-      mine: mine,
-      theirs: theirs
-    };
-  }
-}
-
-function hunkBefore(test, check) {
-  return test.oldStart < check.oldStart && test.oldStart + test.oldLines < check.oldStart;
-}
-
-function cloneHunk(hunk, offset) {
-  return {
-    oldStart: hunk.oldStart,
-    oldLines: hunk.oldLines,
-    newStart: hunk.newStart + offset,
-    newLines: hunk.newLines,
-    lines: hunk.lines
-  };
-}
-
-function mergeLines(hunk, mineOffset, mineLines, theirOffset, theirLines) {
-  // This will generally result in a conflicted hunk, but there are cases where the context
-  // is the only overlap where we can successfully merge the content here.
-  var mine = {
-    offset: mineOffset,
-    lines: mineLines,
-    index: 0
-  },
-      their = {
-    offset: theirOffset,
-    lines: theirLines,
-    index: 0
-  }; // Handle any leading content
-
-  insertLeading(hunk, mine, their);
-  insertLeading(hunk, their, mine); // Now in the overlap content. Scan through and select the best changes from each.
-
-  while (mine.index < mine.lines.length && their.index < their.lines.length) {
-    var mineCurrent = mine.lines[mine.index],
-        theirCurrent = their.lines[their.index];
-
-    if ((mineCurrent[0] === '-' || mineCurrent[0] === '+') && (theirCurrent[0] === '-' || theirCurrent[0] === '+')) {
-      // Both modified ...
-      mutualChange(hunk, mine, their);
-    } else if (mineCurrent[0] === '+' && theirCurrent[0] === ' ') {
-      /*istanbul ignore start*/
-      var _hunk$lines;
-
-      /*istanbul ignore end*/
-      // Mine inserted
-
-      /*istanbul ignore start*/
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-      (_hunk$lines =
-      /*istanbul ignore end*/
-      hunk.lines).push.apply(
-      /*istanbul ignore start*/
-      _hunk$lines
-      /*istanbul ignore end*/
-      ,
-      /*istanbul ignore start*/
-      _toConsumableArray(
-      /*istanbul ignore end*/
-      collectChange(mine)));
-    } else if (theirCurrent[0] === '+' && mineCurrent[0] === ' ') {
-      /*istanbul ignore start*/
-      var _hunk$lines2;
-
-      /*istanbul ignore end*/
-      // Theirs inserted
-
-      /*istanbul ignore start*/
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-      (_hunk$lines2 =
-      /*istanbul ignore end*/
-      hunk.lines).push.apply(
-      /*istanbul ignore start*/
-      _hunk$lines2
-      /*istanbul ignore end*/
-      ,
-      /*istanbul ignore start*/
-      _toConsumableArray(
-      /*istanbul ignore end*/
-      collectChange(their)));
-    } else if (mineCurrent[0] === '-' && theirCurrent[0] === ' ') {
-      // Mine removed or edited
-      removal(hunk, mine, their);
-    } else if (theirCurrent[0] === '-' && mineCurrent[0] === ' ') {
-      // Their removed or edited
-      removal(hunk, their, mine, true);
-    } else if (mineCurrent === theirCurrent) {
-      // Context identity
-      hunk.lines.push(mineCurrent);
-      mine.index++;
-      their.index++;
-    } else {
-      // Context mismatch
-      conflict(hunk, collectChange(mine), collectChange(their));
-    }
-  } // Now push anything that may be remaining
-
-
-  insertTrailing(hunk, mine);
-  insertTrailing(hunk, their);
-  calcLineCount(hunk);
-}
-
-function mutualChange(hunk, mine, their) {
-  var myChanges = collectChange(mine),
-      theirChanges = collectChange(their);
-
-  if (allRemoves(myChanges) && allRemoves(theirChanges)) {
-    // Special case for remove changes that are supersets of one another
-    if (
-    /*istanbul ignore start*/
-    (0,
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    _array
-    /*istanbul ignore end*/
-    .
-    /*istanbul ignore start*/
-    arrayStartsWith)
-    /*istanbul ignore end*/
-    (myChanges, theirChanges) && skipRemoveSuperset(their, myChanges, myChanges.length - theirChanges.length)) {
-      /*istanbul ignore start*/
-      var _hunk$lines3;
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-      (_hunk$lines3 =
-      /*istanbul ignore end*/
-      hunk.lines).push.apply(
-      /*istanbul ignore start*/
-      _hunk$lines3
-      /*istanbul ignore end*/
-      ,
-      /*istanbul ignore start*/
-      _toConsumableArray(
-      /*istanbul ignore end*/
-      myChanges));
-
-      return;
-    } else if (
-    /*istanbul ignore start*/
-    (0,
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    _array
-    /*istanbul ignore end*/
-    .
-    /*istanbul ignore start*/
-    arrayStartsWith)
-    /*istanbul ignore end*/
-    (theirChanges, myChanges) && skipRemoveSuperset(mine, theirChanges, theirChanges.length - myChanges.length)) {
-      /*istanbul ignore start*/
-      var _hunk$lines4;
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-
-      /*istanbul ignore end*/
-
-      /*istanbul ignore start*/
-      (_hunk$lines4 =
-      /*istanbul ignore end*/
-      hunk.lines).push.apply(
-      /*istanbul ignore start*/
-      _hunk$lines4
-      /*istanbul ignore end*/
-      ,
-      /*istanbul ignore start*/
-      _toConsumableArray(
-      /*istanbul ignore end*/
-      theirChanges));
-
-      return;
-    }
-  } else if (
-  /*istanbul ignore start*/
-  (0,
-  /*istanbul ignore end*/
-
-  /*istanbul ignore start*/
-  _array
-  /*istanbul ignore end*/
-  .
-  /*istanbul ignore start*/
-  arrayEqual)
-  /*istanbul ignore end*/
-  (myChanges, theirChanges)) {
-    /*istanbul ignore start*/
-    var _hunk$lines5;
-
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    (_hunk$lines5 =
-    /*istanbul ignore end*/
-    hunk.lines).push.apply(
-    /*istanbul ignore start*/
-    _hunk$lines5
-    /*istanbul ignore end*/
-    ,
-    /*istanbul ignore start*/
-    _toConsumableArray(
-    /*istanbul ignore end*/
-    myChanges));
-
-    return;
-  }
-
-  conflict(hunk, myChanges, theirChanges);
-}
-
-function removal(hunk, mine, their, swap) {
-  var myChanges = collectChange(mine),
-      theirChanges = collectContext(their, myChanges);
-
-  if (theirChanges.merged) {
-    /*istanbul ignore start*/
-    var _hunk$lines6;
-
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-
-    /*istanbul ignore end*/
-
-    /*istanbul ignore start*/
-    (_hunk$lines6 =
-    /*istanbul ignore end*/
-    hunk.lines).push.apply(
-    /*istanbul ignore start*/
-    _hunk$lines6
-    /*istanbul ignore end*/
-    ,
-    /*istanbul ignore start*/
-    _toConsumableArray(
-    /*istanbul ignore end*/
-    theirChanges.merged));
-  } else {
-    conflict(hunk, swap ? theirChanges : myChanges, swap ? myChanges : theirChanges);
-  }
-}
-
-function conflict(hunk, mine, their) {
-  hunk.conflict = true;
-  hunk.lines.push({
-    conflict: true,
-    mine: mine,
-    theirs: their
-  });
-}
-
-function insertLeading(hunk, insert, their) {
-  while (insert.offset < their.offset && insert.index < insert.lines.length) {
-    var line = insert.lines[insert.index++];
-    hunk.lines.push(line);
-    insert.offset++;
-  }
-}
-
-function insertTrailing(hunk, insert) {
-  while (insert.index < insert.lines.length) {
-    var line = insert.lines[insert.index++];
-    hunk.lines.push(line);
-  }
-}
-
-function collectChange(state) {
-  var ret = [],
-      operation = state.lines[state.index][0];
-
-  while (state.index < state.lines.length) {
-    var line = state.lines[state.index]; // Group additions that are immediately after subtractions and treat them as one "atomic" modify change.
-
-    if (operation === '-' && line[0] === '+') {
-      operation = '+';
-    }
-
-    if (operation === line[0]) {
-      ret.push(line);
-      state.index++;
-    } else {
-      break;
-    }
-  }
-
-  return ret;
-}
-
-function collectContext(state, matchChanges) {
-  var changes = [],
-      merged = [],
-      matchIndex = 0,
-      contextChanges = false,
-      conflicted = false;
-
-  while (matchIndex < matchChanges.length && state.index < state.lines.length) {
-    var change = state.lines[state.index],
-        match = matchChanges[matchIndex]; // Once we've hit our add, then we are done
-
-    if (match[0] === '+') {
-      break;
-    }
-
-    contextChanges = contextChanges || change[0] !== ' ';
-    merged.push(match);
-    matchIndex++; // Consume any additions in the other block as a conflict to attempt
-    // to pull in the remaining context after this
-
-    if (change[0] === '+') {
-      conflicted = true;
-
-      while (change[0] === '+') {
-        changes.push(change);
-        change = state.lines[++state.index];
-      }
-    }
-
-    if (match.substr(1) === change.substr(1)) {
-      changes.push(change);
-      state.index++;
-    } else {
-      conflicted = true;
-    }
-  }
-
-  if ((matchChanges[matchIndex] || '')[0] === '+' && contextChanges) {
-    conflicted = true;
-  }
-
-  if (conflicted) {
-    return changes;
-  }
-
-  while (matchIndex < matchChanges.length) {
-    merged.push(matchChanges[matchIndex++]);
-  }
-
-  return {
-    merged: merged,
-    changes: changes
-  };
-}
-
-function allRemoves(changes) {
-  return changes.reduce(function (prev, change) {
-    return prev && change[0] === '-';
-  }, true);
-}
-
-function skipRemoveSuperset(state, removeChanges, delta) {
-  for (var i = 0; i < delta; i++) {
-    var changeContent = removeChanges[removeChanges.length - delta + i].substr(1);
-
-    if (state.lines[state.index + i] !== ' ' + changeContent) {
-      return false;
-    }
-  }
-
-  state.index += delta;
-  return true;
-}
-
-function calcOldNewLineCount(lines) {
-  var oldLines = 0;
-  var newLines = 0;
-  lines.forEach(function (line) {
-    if (typeof line !== 'string') {
-      var myCount = calcOldNewLineCount(line.mine);
-      var theirCount = calcOldNewLineCount(line.theirs);
-
-      if (oldLines !== undefined) {
-        if (myCount.oldLines === theirCount.oldLines) {
-          oldLines += myCount.oldLines;
-        } else {
-          oldLines = undefined;
-        }
-      }
-
-      if (newLines !== undefined) {
-        if (myCount.newLines === theirCount.newLines) {
-          newLines += myCount.newLines;
-        } else {
-          newLines = undefined;
-        }
-      }
-    } else {
-      if (newLines !== undefined && (line[0] === '+' || line[0] === ' ')) {
-        newLines++;
-      }
-
-      if (oldLines !== undefined && (line[0] === '-' || line[0] === ' ')) {
-        oldLines++;
-      }
-    }
-  });
-  return {
-    oldLines: oldLines,
-    newLines: newLines
-  };
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9wYXRjaC9tZXJnZS5qcyJdLCJuYW1lcyI6WyJjYWxjTGluZUNvdW50IiwiaHVuayIsImNhbGNPbGROZXdMaW5lQ291bnQiLCJsaW5lcyIsIm9sZExpbmVzIiwibmV3TGluZXMiLCJ1bmRlZmluZWQiLCJtZXJnZSIsIm1pbmUiLCJ0aGVpcnMiLCJiYXNlIiwibG9hZFBhdGNoIiwicmV0IiwiaW5kZXgiLCJuZXdGaWxlTmFtZSIsImZpbGVOYW1lQ2hhbmdlZCIsIm9sZEZpbGVOYW1lIiwib2xkSGVhZGVyIiwibmV3SGVhZGVyIiwic2VsZWN0RmllbGQiLCJodW5rcyIsIm1pbmVJbmRleCIsInRoZWlyc0luZGV4IiwibWluZU9mZnNldCIsInRoZWlyc09mZnNldCIsImxlbmd0aCIsIm1pbmVDdXJyZW50Iiwib2xkU3RhcnQiLCJJbmZpbml0eSIsInRoZWlyc0N1cnJlbnQiLCJodW5rQmVmb3JlIiwicHVzaCIsImNsb25lSHVuayIsIm1lcmdlZEh1bmsiLCJNYXRoIiwibWluIiwibmV3U3RhcnQiLCJtZXJnZUxpbmVzIiwicGFyYW0iLCJ0ZXN0IiwicGFyc2VQYXRjaCIsIkVycm9yIiwic3RydWN0dXJlZFBhdGNoIiwicGF0Y2giLCJjb25mbGljdCIsImNoZWNrIiwib2Zmc2V0IiwibWluZUxpbmVzIiwidGhlaXJPZmZzZXQiLCJ0aGVpckxpbmVzIiwidGhlaXIiLCJpbnNlcnRMZWFkaW5nIiwidGhlaXJDdXJyZW50IiwibXV0dWFsQ2hhbmdlIiwiY29sbGVjdENoYW5nZSIsInJlbW92YWwiLCJpbnNlcnRUcmFpbGluZyIsIm15Q2hhbmdlcyIsInRoZWlyQ2hhbmdlcyIsImFsbFJlbW92ZXMiLCJhcnJheVN0YXJ0c1dpdGgiLCJza2lwUmVtb3ZlU3VwZXJzZXQiLCJhcnJheUVxdWFsIiwic3dhcCIsImNvbGxlY3RDb250ZXh0IiwibWVyZ2VkIiwiaW5zZXJ0IiwibGluZSIsInN0YXRlIiwib3BlcmF0aW9uIiwibWF0Y2hDaGFuZ2VzIiwiY2hhbmdlcyIsIm1hdGNoSW5kZXgiLCJjb250ZXh0Q2hhbmdlcyIsImNvbmZsaWN0ZWQiLCJjaGFuZ2UiLCJtYXRjaCIsInN1YnN0ciIsInJlZHVjZSIsInByZXYiLCJyZW1vdmVDaGFuZ2VzIiwiZGVsdGEiLCJpIiwiY2hhbmdlQ29udGVudCIsImZvckVhY2giLCJteUNvdW50IiwidGhlaXJDb3VudCJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7OztBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7O0FBQ0E7QUFBQTtBQUFBO0FBQUE7QUFBQTs7QUFFQTtBQUFBO0FBQUE7QUFBQTtBQUFBOzs7Ozs7Ozs7Ozs7Ozs7QUFFTyxTQUFTQSxhQUFULENBQXVCQyxJQUF2QixFQUE2QjtBQUFBO0FBQUE7QUFBQTtBQUNMQyxFQUFBQSxtQkFBbUIsQ0FBQ0QsSUFBSSxDQUFDRSxLQUFOLENBRGQ7QUFBQSxNQUMzQkMsUUFEMkIsd0JBQzNCQSxRQUQyQjtBQUFBLE1BQ2pCQyxRQURpQix3QkFDakJBLFFBRGlCOztBQUdsQyxNQUFJRCxRQUFRLEtBQUtFLFNBQWpCLEVBQTRCO0FBQzFCTCxJQUFBQSxJQUFJLENBQUNHLFFBQUwsR0FBZ0JBLFFBQWhCO0FBQ0QsR0FGRCxNQUVPO0FBQ0wsV0FBT0gsSUFBSSxDQUFDRyxRQUFaO0FBQ0Q7O0FBRUQsTUFBSUMsUUFBUSxLQUFLQyxTQUFqQixFQUE0QjtBQUMxQkwsSUFBQUEsSUFBSSxDQUFDSSxRQUFMLEdBQWdCQSxRQUFoQjtBQUNELEdBRkQsTUFFTztBQUNMLFdBQU9KLElBQUksQ0FBQ0ksUUFBWjtBQUNEO0FBQ0Y7O0FBRU0sU0FBU0UsS0FBVCxDQUFlQyxJQUFmLEVBQXFCQyxNQUFyQixFQUE2QkMsSUFBN0IsRUFBbUM7QUFDeENGLEVBQUFBLElBQUksR0FBR0csU0FBUyxDQUFDSCxJQUFELEVBQU9FLElBQVAsQ0FBaEI7QUFDQUQsRUFBQUEsTUFBTSxHQUFHRSxTQUFTLENBQUNGLE1BQUQsRUFBU0MsSUFBVCxDQUFsQjtBQUVBLE1BQUlFLEdBQUcsR0FBRyxFQUFWLENBSndD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QUFKLEVBQW9FO0FBQ2xFL0QsUUFBQUEsUUFBUTtBQUNUO0FBQ0Y7QUFDRixHQTVCRDtBQThCQSxTQUFPO0FBQUNBLElBQUFBLFFBQVEsRUFBUkEsUUFBRDtBQUFXQyxJQUFBQSxRQUFRLEVBQVJBO0FBQVgsR0FBUDtBQUNEIiwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHtzdHJ1Y3R1cmVkUGF0Y2h9IGZyb20gJy4vY3JlYXRlJztcbmltcG9ydCB7cGFyc2VQYXRjaH0gZnJvbSAnLi9wYXJzZSc7XG5cbmltcG9ydCB7YXJyYXlFcXVhbCwgYXJyYXlTdGFydHNXaXRofSBmcm9tICcuLi91dGlsL2FycmF5JztcblxuZXhwb3J0IGZ1bmN0aW9uIGNhbGNMaW5lQ291bnQoaHVuaykge1xuICBjb25zdCB7b2xkTGluZXMsIG5ld0xpbmVzfSA9IGNhbGNPbGROZXdMaW5lQ291bnQoaHVuay5saW5lcyk7XG5cbiAgaWYgKG9sZExpbmVzICE9PSB1bmRlZmluZWQpIHtcbiAgICBodW5rLm9sZExpbmVzID0gb2xkTGluZXM7XG4gIH0gZWxzZSB7XG4gICAgZGVsZXRlIGh1bmsub2xkTGluZXM7XG4gIH1cblxuICBpZiAobmV3TGluZXMgIT09IHVuZGVmaW5lZCkge1xuICAgIGh1bmsubmV3TGluZXMgPSBuZXdMaW5lcztcbiAgfSBlbHNlIHtcbiAgICBkZWxldGUgaHVuay5uZXdMaW5lcztcbiAgfVxufVxuXG5leHBvcnQgZnVuY3Rpb24gbWVyZ2UobWluZSwgdGhlaXJzLCBiYXNlKSB7XG4gIG1pbmUgPSBsb2FkUGF0Y2gobWluZSwgYmFzZSk7XG4gIHRoZWlycyA9IGxvYWRQYXRjaCh0aGVpcnMsIGJhc2UpO1xuXG4gIGxldCByZXQgPSB7fTtcblxuICAvLyBGb3IgaW5kZXggd2UganVzdCBsZXQgaXQgcGFzcyB0aHJvdWdoIGFzIGl0IGRvZXNuJ3QgaGF2ZSBhbnkgbmVjZXNzYXJ5IG1lYW5pbmcuXG4gIC8vIExlYXZpbmcgc2FuaXR5IGNoZWNrcyBvbiB0aGlzIHRvIHRoZSBBUEkgY29uc3VtZXIgdGhhdCBtYXkga25vdyBtb3JlIGFib3V0IHRoZVxuICAvLyBtZWFuaW5nIGluIHRoZWlyIG93biBjb250ZXh0LlxuICBpZiAobWluZS5pbmRleCB8fCB0aGVpcnMuaW5kZXgpIHtcbiAgICByZXQuaW5kZXggPSBtaW5lLmluZGV4IHx8IHRoZWlycy5pbmRleDtcbiAgfVxuXG4gIGlmIChtaW5lLm5ld0ZpbGVOYW1lIHx8IHRoZWlycy5uZXdGaWxlTmFtZSkge1xuICAgIGlmICghZmlsZU5hbWVDaGFuZ2VkKG1pbmUpKSB7XG4gICAgICAvLyBObyBoZWFkZXIgb3Igbm8gY2hhbmdlIGluIG91cnMsIHVzZSB0aGVpcnMgKGFuZCBvdXJzIGlmIHRoZWlycyBkb2VzIG5vdCBleGlzdClcbiAgICAgIHJldC5vbGRGaWxlTmFtZSA9IHRoZWlycy5vbGRGaWxlTmFtZSB8fCBtaW5lLm9sZEZpbGVOYW1lO1xuICAgICAgcmV0Lm5ld0ZpbGVOYW1lID0gdGhlaXJzLm5ld0ZpbGVOYW1lIHx8IG1pbmUubmV3RmlsZU5hbWU7XG4gICAgICByZXQub2xkSGVhZGVyID0gdGhlaXJzLm9sZEhlYWRlciB8fCBtaW5lLm9sZEhlYWRlcjtcbiAgICAgIHJldC5uZXdIZWFkZXIgPSB0aGVpcnMubmV3SGVhZGVyIHx8IG1pbmUubmV3SGVhZGVyO1xuICAgIH0gZWxzZSBpZiAoIWZpbGVOYW1lQ2hhbmdlZCh0aGVpcnMpKSB7XG4gICAgICAvLyBObyBoZWFkZXIgb3Igbm8gY2hhbmdlIGluIHRoZWlycywgdXNlIG91cnNcbiAgICAgIHJldC5vbGRGaWxlTmFtZSA9IG1pbmUub2xkRmlsZU5hbWU7XG4gICAgICByZXQubmV3RmlsZU5hbWUgPSBtaW5lLm5ld0ZpbGVOYW1lO1xuICAgICAgcmV0Lm9sZEhlYWRlciA9IG1pbmUub2xkSGVhZGVyO1xuICAgICAgcmV0Lm5ld0hlYWRlciA9IG1pbmUubmV3SGVhZGVyO1xuICAgIH0gZWxzZSB7XG4gICAgICAvLyBCb3RoIGNoYW5nZWQuLi4gZmlndXJlIGl0IG91dFxuICAgICAgcmV0Lm9sZEZpbGVOYW1lID0gc2VsZWN0RmllbGQocmV0LCBtaW5lLm9sZEZpbGVOYW1lLCB0aGVpcnMub2xkRmlsZU5hbWUpO1xuICAgICAgcmV0Lm5ld0ZpbGVOYW1lID0gc2VsZWN0RmllbGQocmV0LCBtaW5lLm5ld0ZpbGVOYW1lLCB0aGVpcnMubmV3RmlsZU5hbWUpO1xuICAgICAgcmV0Lm9sZEhlYWRlciA9IHNlbGVjdEZpZWxkKHJldCwgbWluZS5vbGRIZWFkZXIsIHRoZWlycy5vbGRIZWFkZXIpO1xuICAgICAgcmV0Lm5ld0hlYWRlciA9IHNlbGVjdEZpZWxkKHJldCwgbWluZS5uZXdIZWFkZXIsIHRoZWlycy5uZXdIZWFkZXIpO1xuICAgIH1cbiAgfVxuXG4gIHJldC5odW5rcyA9IFtdO1xuXG4gIGxldCBtaW5lSW5kZXggPSAwLFxuICAgICAgdGhlaXJzSW5kZXggPSAwLFxuICAgICAgbWluZU9mZnNldCA9IDAsXG4gICAgICB0aGVpcnNPZmZzZXQgPSAwO1xuXG4gIHdoaWxlIChtaW5lSW5kZXggPCBtaW5lLmh1bmtzLmxlbmd0aCB8fCB0aGVpcnNJbmRleCA8IHRoZWlycy5odW5rcy5sZW5ndGgpIHtcbiAgICBsZXQgbWluZUN1cnJlbnQgPSBtaW5lLmh1bmtzW21pbmVJbmRleF0gfHwge29sZFN0YXJ0OiBJbmZpbml0eX0sXG4gICAgICAgIHRoZWlyc0N1cnJlbnQgPSB0aGVpcnMuaHVua3NbdGhlaXJzSW5kZXhdIHx8IHtvbGRTdGFydDogSW5maW5pdHl9O1xuXG4gICAgaWYgKGh1bmtCZWZvcmUobWluZUN1cnJlbnQsIHRoZWlyc0N1cnJlbnQpKSB7XG4gICAgICAvLyBUaGlzIHBhdGNoIGRvZXMgbm90IG92ZXJsYXAgd2l0aCBhbnkgb2YgdGhlIG90aGVycywgeWF5LlxuICAgICAgcmV0Lmh1bmtzLnB1c2goY2xvbmVIdW5rKG1pbmVDdXJyZW50LCBtaW5lT2Zmc2V0KSk7XG4gICAgICBtaW5lSW5kZXgrKztcbiAgICAgIHRoZWlyc09mZnNldCArPSBtaW5lQ3VycmVudC5uZXdMaW5lcyAtIG1pbmVDdXJyZW50Lm9sZExpbmVzO1xuICAgIH0gZWxzZSBpZiAoaHVua0JlZm9yZSh0aGVpcnNDdXJyZW50LCBtaW5lQ3VycmVudCkpIHtcbiAgICAgIC8vIFRoaXMgcGF0Y2ggZG9lcyBub3Qgb3ZlcmxhcCB3aXRoIGFueSBvZiB0aGUgb3RoZXJzLCB5YXkuXG4gICAgICByZXQuaHVua3MucHVzaChjbG9uZUh1bmsodGhlaXJzQ3VycmVudCwgdGhlaXJzT2Zmc2V0KSk7XG4gICAgICB0aGVpcnNJbmRleCsrO1xuICAgICAgbWluZU9mZnNldCArPSB0aGVpcnNDdXJyZW50Lm5ld0xpbmVzIC0gdGhlaXJzQ3VycmVudC5vbGRMaW5lcztcbiAgICB9IGVsc2Uge1xuICAgICAgLy8gT3ZlcmxhcCwgbWVyZ2UgYXMgYmVzdCB3ZSBjYW5cbiAgICAgIGxldCBtZXJnZWRIdW5rID0ge1xuICAgICAgICBvbGRTdGFydDogTWF0aC5taW4obWluZUN1cnJlbnQub2xkU3RhcnQsIHRoZWlyc0N1cnJlbnQub2xkU3RhcnQpLFxuICAgICAgICBvbGRMaW5lczogMCxcbiAgICAgICAgbmV3U3RhcnQ6IE1hdGgubWluKG1pbmVDdXJyZW50Lm5ld1N0YXJ0ICsgbWluZU9mZnNldCwgdGhlaXJzQ3VycmVudC5vbGRTdGFydCArIHRoZWlyc09mZnNldCksXG4gICAgICAgIG5ld0xpbmVzOiAwLFxuICAgICAgICBsaW5lczogW11cbiAgICAgIH07XG4gICAgICBtZXJnZUxpbmVzKG1lcmdlZEh1bmssIG1pbmVDdXJyZW50Lm9sZFN0YXJ0LCBtaW5lQ3VycmVudC5saW5lcywgdGhlaXJzQ3VycmVudC5vbGRTdGFydCwgdGhlaXJzQ3VycmVudC5saW5lcyk7XG4gICAgICB0aGVpcnNJbmRleCsrO1xuICAgICAgbWluZUluZGV4Kys7XG5cbiAgICAgIHJldC5odW5rcy5wdXNoKG1lcmdlZEh1bmspO1xuICAgIH1cbiAgfVxuXG4gIHJldHVybiByZXQ7XG59XG5cbmZ1bmN0aW9uIGxvYWRQYXRjaChwYXJhbSwgYmFzZSkge1xuICBpZiAodHlwZW9mIHBhcmFtID09PSAnc3RyaW5nJykge1xuICAgIGlmICgoL15AQC9tKS50ZXN0KHBhcmFtKSB8fCAoKC9eSW5kZXg6L20pLnRlc3QocGFyYW0pKSkge1xuICAgICAgcmV0dXJuIHBhcnNlUGF0Y2gocGFyYW0pWzBdO1xuICAgIH1cblxuICAgIGlmICghYmFzZSkge1xuICAgICAgdGhyb3cgbmV3IEVycm9yKCdNdXN0IHByb3ZpZGUgYSBiYXNlIHJlZmVyZW5jZSBvciBwYXNzIGluIGEgcGF0Y2gnKTtcbiAgICB9XG4gICAgcmV0dXJuIHN0cnVjdHVyZWRQYXRjaCh1bmRlZmluZWQsIHVuZGVmaW5lZCwgYmFzZSwgcGFyYW0pO1xuICB9XG5cbiAgcmV0dXJuIHBhcmFtO1xufVxuXG5mdW5jdGlvbiBmaWxlTmFtZUNoYW5nZWQocGF0Y2gpIHtcbiAgcmV0dXJuIHBhdGNoLm5ld0ZpbGVOYW1lICYmIHBhdGNoLm5ld0ZpbGVOYW1lICE9PSBwYXRjaC5vbGRGaWxlTmFtZTtcbn1cblxuZnVuY3Rpb24gc2VsZWN0RmllbGQoaW5kZXgsIG1pbmUsIHRoZWlycykge1xuICBpZiAobWluZSA9PT0gdGhlaXJzKSB7XG4gICAgcmV0dXJuIG1pbmU7XG4gIH0gZWxzZSB7XG4gICAgaW5kZXguY29uZmxpY3QgPSB0cnVlO1xuICAgIHJldHVybiB7bWluZSwgdGhlaXJzfTtcbiAgfVxufVxuXG5mdW5jdGlvbiBodW5rQmVmb3JlKHRlc3QsIGNoZWNrKSB7XG4gIHJldHVybiB0ZXN0Lm9sZFN0YXJ0IDwgY2hlY2sub2xkU3RhcnRcbiAgICAmJiAodGVzdC5vbGRTdGFydCArIHRlc3Qub2xkTGluZXMpIDwgY2hlY2sub2xkU3RhcnQ7XG59XG5cbmZ1bmN0aW9uIGNsb25lSHVuayhodW5rLCBvZmZzZXQpIHtcbiAgcmV0dXJuIHtcbiAgICBvbGRTdGFydDogaHVuay5vbGRTdGFydCwgb2xkTGluZXM6IGh1bmsub2xkTGluZXMsXG4gICAgbmV3U3RhcnQ6IGh1bmsubmV3U3RhcnQgKyBvZmZzZXQsIG5ld0xpbmVzOiBodW5rLm5ld0xpbmVzLFxuICAgIGxpbmVzOiBodW5rLmxpbmVzXG4gIH07XG59XG5cbmZ1bmN0aW9uIG1lcmdlTGluZXMoaHVuaywgbWluZU9mZnNldCwgbWluZUxpbmVzLCB0aGVpck9mZnNldCwgdGhlaXJMaW5lcykge1xuICAvLyBUaGlzIHdpbGwgZ2VuZXJhbGx5IHJlc3VsdCBpbiBhIGNvbmZsaWN0ZWQgaHVuaywgYnV0IHRoZXJlIGFyZSBjYXNlcyB3aGVyZSB0aGUgY29udGV4dFxuICAvLyBpcyB0aGUgb25seSBvdmVybGFwIHdoZXJlIHdlIGNhbiBzdWNjZXNzZnVsbHkgbWVyZ2UgdGhlIGNvbnRlbnQgaGVyZS5cbiAgbGV0IG1pbmUgPSB7b2Zmc2V0OiBtaW5lT2Zmc2V0LCBsaW5lczogbWluZUxpbmVzLCBpbmRleDogMH0sXG4gICAgICB0aGVpciA9IHtvZmZzZXQ6IHRoZWlyT2Zmc2V0LCBsaW5lczogdGhlaXJMaW5lcywgaW5kZXg6IDB9O1xuXG4gIC8vIEhhbmRsZSBhbnkgbGVhZGluZyBjb250ZW50XG4gIGluc2VydExlYWRpbmcoaHVuaywgbWluZSwgdGhlaXIpO1xuICBpbnNlcnRMZWFkaW5nKGh1bmssIHRoZWlyLCBtaW5lKTtcblxuICAvLyBOb3cgaW4gdGhlIG92ZXJsYXAgY29udGVudC4gU2NhbiB0aHJvdWdoIGFuZCBzZWxlY3QgdGhlIGJlc3QgY2hhbmdlcyBmcm9tIGVhY2guXG4gIHdoaWxlIChtaW5lLmluZGV4IDwgbWluZS5saW5lcy5sZW5ndGggJiYgdGhlaXIuaW5kZXggPCB0aGVpci5saW5lcy5sZW5ndGgpIHtcbiAgICBsZXQgbWluZUN1cnJlbnQgPSBtaW5lLmxpbmVzW21pbmUuaW5kZXhdLFxuICAgICAgICB0aGVpckN1cnJlbnQgPSB0aGVpci5saW5lc1t0aGVpci5pbmRleF07XG5cbiAgICBpZiAoKG1pbmVDdXJyZW50WzBdID09PSAnLScgfHwgbWluZUN1cnJlbnRbMF0gPT09ICcrJylcbiAgICAgICAgJiYgKHRoZWlyQ3VycmVudFswXSA9PT0gJy0nIHx8IHRoZWlyQ3VycmVudFswXSA9PT0gJysnKSkge1xuICAgICAgLy8gQm90aCBtb2RpZmllZCAuLi5cbiAgICAgIG11dHVhbENoYW5nZShodW5rLCBtaW5lLCB0aGVpcik7XG4gICAgfSBlbHNlIGlmIChtaW5lQ3VycmVudFswXSA9PT0gJysnICYmIHRoZWlyQ3VycmVudFswXSA9PT0gJyAnKSB7XG4gICAgICAvLyBNaW5lIGluc2VydGVkXG4gICAgICBodW5rLmxpbmVzLnB1c2goLi4uIGNvbGxlY3RDaGFuZ2UobWluZSkpO1xuICAgIH0gZWxzZSBpZiAodGhlaXJDdXJyZW50WzBdID09PSAnKycgJiYgbWluZUN1cnJlbnRbMF0gPT09ICcgJykge1xuICAgICAgLy8gVGhlaXJzIGluc2VydGVkXG4gICAgICBodW5rLmxpbmVzLnB1c2goLi4uIGNvbGxlY3RDaGFuZ2UodGhlaXIpKTtcbiAgICB9IGVsc2UgaWYgKG1pbmVDdXJyZW50WzBdID09PSAnLScgJiYgdGhlaXJDdXJyZW50WzBdID09PSAnICcpIHtcbiAgICAgIC8vIE1pbmUgcmVtb3ZlZCBvciBlZGl0ZWRcbiAgICAgIHJlbW92YWwoaHVuaywgbWluZSwgdGhlaXIpO1xuICAgIH0gZWxzZSBpZiAodGhlaXJDdXJyZW50WzBdID09PSAnLScgJiYgbWluZUN1cnJlbnRbMF0gPT09ICcgJykge1xuICAgICAgLy8gVGhlaXIgcmVtb3ZlZCBvciBlZGl0ZWRcbiAgICAgIHJlbW92YWwoaHVuaywgdGhlaXIsIG1pbmUsIHRydWUpO1xuICAgIH0gZWxzZSBpZiAobWluZUN1cnJlbnQgPT09IHRoZWlyQ3VycmVudCkge1xuICAgICAgLy8gQ29udGV4dCBpZGVudGl0eVxuICAgICAgaHVuay5saW5lcy5wdXNoKG1pbmVDdXJyZW50KTtcbiAgICAgIG1pbmUuaW5kZXgrKztcbiAgICAgIHRoZWlyLmluZGV4Kys7XG4gICAgfSBlbHNlIHtcbiAgICAgIC8vIENvbnRleHQgbWlzbWF0Y2hcbiAgICAgIGNvbmZsaWN0KGh1bmssIGNvbGxlY3RDaGFuZ2UobWluZSksIGNvbGxlY3RDaGFuZ2UodGhlaXIpKTtcbiAgICB9XG4gIH1cblxuICAvLyBOb3cgcHVzaCBhbnl0aGluZyB0aGF0IG1heSBiZSByZW1haW5pbmdcbiAgaW5zZXJ0VHJhaWxpbmcoaHVuaywgbWluZSk7XG4gIGluc2VydFRyYWlsaW5nKGh1bmssIHRoZWlyKTtcblxuICBjYWxjTGluZUNvdW50KGh1bmspO1xufVxuXG5mdW5jdGlvbiBtdXR1YWxDaGFuZ2UoaHVuaywgbWluZSwgdGhlaXIpIHtcbiAgbGV0IG15Q2hhbmdlcyA9IGNvbGxlY3RDaGFuZ2UobWluZSksXG4gICAgICB0aGVpckNoYW5nZXMgPSBjb2xsZWN0Q2hhbmdlKHRoZWlyKTtcblxuICBpZiAoYWxsUmVtb3ZlcyhteUNoYW5nZXMpICYmIGFsbFJlbW92ZXModGhlaXJDaGFuZ2VzKSkge1xuICAgIC8vIFNwZWNpYWwgY2FzZSBmb3IgcmVtb3ZlIGNoYW5nZXMgdGhhdCBhcmUgc3VwZXJzZXRzIG9mIG9uZSBhbm90aGVyXG4gICAgaWYgKGFycmF5U3RhcnRzV2l0aChteUNoYW5nZXMsIHRoZWlyQ2hhbmdlcylcbiAgICAgICAgJiYgc2tpcFJlbW92ZVN1cGVyc2V0KHRoZWlyLCBteUNoYW5nZXMsIG15Q2hhbmdlcy5sZW5ndGggLSB0aGVpckNoYW5nZXMubGVuZ3RoKSkge1xuICAgICAgaHVuay5saW5lcy5wdXNoKC4uLiBteUNoYW5nZXMpO1xuICAgICAgcmV0dXJuO1xuICAgIH0gZWxzZSBpZiAoYXJyYXlTdGFydHNXaXRoKHRoZWlyQ2hhbmdlcywgbXlDaGFuZ2VzKVxuICAgICAgICAmJiBza2lwUmVtb3ZlU3VwZXJzZXQobWluZSwgdGhlaXJDaGFuZ2VzLCB0aGVpckNoYW5nZXMubGVuZ3RoIC0gbXlDaGFuZ2VzLmxlbmd0aCkpIHtcbiAgICAgIGh1bmsubGluZXMucHVzaCguLi4gdGhlaXJDaGFuZ2VzKTtcbiAgICAgIHJldHVybjtcbiAgICB9XG4gIH0gZWxzZSBpZiAoYXJyYXlFcXVhbChteUNoYW5nZXMsIHRoZWlyQ2hhbmdlcykpIHtcbiAgICBodW5rLmxpbmVzLnB1c2goLi4uIG15Q2hhbmdlcyk7XG4gICAgcmV0dXJuO1xuICB9XG5cbiAgY29uZmxpY3QoaHVuaywgbXlDaGFuZ2VzLCB0aGVpckNoYW5nZXMpO1xufVxuXG5mdW5jdGlvbiByZW1vdmFsKGh1bmssIG1pbmUsIHRoZWlyLCBzd2FwKSB7XG4gIGxldCBteUNoYW5nZXMgPSBjb2xsZWN0Q2hhbmdlKG1pbmUpLFxuICAgICAgdGhlaXJDaGFuZ2VzID0gY29sbGVjdENvbnRleHQodGhlaXIsIG15Q2hhbmdlcyk7XG4gIGlmICh0aGVpckNoYW5nZXMubWVyZ2VkKSB7XG4gICAgaHVuay5saW5lcy5wdXNoKC4uLiB0aGVpckNoYW5nZXMubWVyZ2VkKTtcbiAgfSBlbHNlIHtcbiAgICBjb25mbGljdChodW5rLCBzd2FwID8gdGhlaXJDaGFuZ2VzIDogbXlDaGFuZ2VzLCBzd2FwID8gbXlDaGFuZ2VzIDogdGhlaXJDaGFuZ2VzKTtcbiAgfVxufVxuXG5mdW5jdGlvbiBjb25mbGljdChodW5rLCBtaW5lLCB0aGVpcikge1xuICBodW5rLmNvbmZsaWN0ID0gdHJ1ZTtcbiAgaHVuay5saW5lcy5wdXNoKHtcbiAgICBjb25mbGljdDogdHJ1ZSxcbiAgICBtaW5lOiBtaW5lLFxuICAgIHRoZWlyczogdGhlaXJcbiAgfSk7XG59XG5cbmZ1bmN0aW9uIGluc2VydExlYWRpbmcoaHVuaywgaW5zZXJ0LCB0aGVpcikge1xuICB3aGlsZSAoaW5zZXJ0Lm9mZnNldCA8IHRoZWlyLm9mZnNldCAmJiBpbnNlcnQuaW5kZXggPCBpbnNlcnQubGluZXMubGVuZ3RoKSB7XG4gICAgbGV0IGxpbmUgPSBpbnNlcnQubGluZXNbaW5zZXJ0LmluZGV4KytdO1xuICAgIGh1bmsubGluZXMucHVzaChsaW5lKTtcbiAgICBpbnNlcnQub2Zmc2V0Kys7XG4gIH1cbn1cbmZ1bmN0aW9uIGluc2VydFRyYWlsaW5nKGh1bmssIGluc2VydCkge1xuICB3aGlsZSAoaW5zZXJ0LmluZGV4IDwgaW5zZXJ0LmxpbmVzLmxlbmd0aCkge1xuICAgIGxldCBsaW5lID0gaW5zZXJ0LmxpbmVzW2luc2VydC5pbmRleCsrXTtcbiAgICBodW5rLmxpbmVzLnB1c2gobGluZSk7XG4gIH1cbn1cblxuZnVuY3Rpb24gY29sbGVjdENoYW5nZShzdGF0ZSkge1xuICBsZXQgcmV0ID0gW10sXG4gICAgICBvcGVyYXRpb24gPSBzdGF0ZS5saW5lc1tzdGF0ZS5pbmRleF1bMF07XG4gIHdoaWxlIChzdGF0ZS5pbmRleCA8IHN0YXRlLmxpbmVzLmxlbmd0aCkge1xuICAgIGxldCBsaW5lID0gc3RhdGUubGluZXNbc3RhdGUuaW5kZXhdO1xuXG4gICAgLy8gR3JvdXAgYWRkaXRpb25zIHRoYXQgYXJlIGltbWVkaWF0ZWx5IGFmdGVyIHN1YnRyYWN0aW9ucyBhbmQgdHJlYXQgdGhlbSBhcyBvbmUgXCJhdG9taWNcIiBtb2RpZnkgY2hhbmdlLlxuICAgIGlmIChvcGVyYXRpb24gPT09ICctJyAmJiBsaW5lWzBdID09PSAnKycpIHtcbiAgICAgIG9wZXJhdGlvbiA9ICcrJztcbiAgICB9XG5cbiAgICBpZiAob3BlcmF0aW9uID09PSBsaW5lWzBdKSB7XG4gICAgICByZXQucHVzaChsaW5lKTtcbiAgICAgIHN0YXRlLmluZGV4Kys7XG4gICAgfSBlbHNlIHtcbiAgICAgIGJyZWFrO1xuICAgIH1cbiAgfVxuXG4gIHJldHVybiByZXQ7XG59XG5mdW5jdGlvbiBjb2xsZWN0Q29udGV4dChzdGF0ZSwgbWF0Y2hDaGFuZ2VzKSB7XG4gIGxldCBjaGFuZ2VzID0gW10sXG4gICAgICBtZXJnZWQgPSBbXSxcbiAgICAgIG1hdGNoSW5kZXggPSAwLFxuICAgICAgY29udGV4dENoYW5nZXMgPSBmYWxzZSxcbiAgICAgIGNvbmZsaWN0ZWQgPSBmYWxzZTtcbiAgd2hpbGUgKG1hdGNoSW5kZXggPCBtYXRjaENoYW5nZXMubGVuZ3RoXG4gICAgICAgICYmIHN0YXRlLmluZGV4IDwgc3RhdGUubGluZXMubGVuZ3RoKSB7XG4gICAgbGV0IGNoYW5nZSA9IHN0YXRlLmxpbmVzW3N0YXRlLmluZGV4XSxcbiAgICAgICAgbWF0Y2ggPSBtYXRjaENoYW5nZXNbbWF0Y2hJbmRleF07XG5cbiAgICAvLyBPbmNlIHdlJ3ZlIGhpdCBvdXIgYWRkLCB0aGVuIHdlIGFyZSBkb25lXG4gICAgaWYgKG1hdGNoWzBdID09PSAnKycpIHtcbiAgICAgIGJyZWFrO1xuICAgIH1cblxuICAgIGNvbnRleHRDaGFuZ2VzID0gY29udGV4dENoYW5nZXMgfHwgY2hhbmdlWzBdICE9PSAnICc7XG5cbiAgICBtZXJnZWQucHVzaChtYXRjaCk7XG4gICAgbWF0Y2hJbmRleCsrO1xuXG4gICAgLy8gQ29uc3VtZSBhbnkgYWRkaXRpb25zIGluIHRoZSBvdGhlciBibG9jayBhcyBhIGNvbmZsaWN0IHRvIGF0dGVtcHRcbiAgICAvLyB0byBwdWxsIGluIHRoZSByZW1haW5pbmcgY29udGV4dCBhZnRlciB0aGlzXG4gICAgaWYgKGNoYW5nZVswXSA9PT0gJysnKSB7XG4gICAgICBjb25mbGljdGVkID0gdHJ1ZTtcblxuICAgICAgd2hpbGUgKGNoYW5nZVswXSA9PT0gJysnKSB7XG4gICAgICAgIGNoYW5nZXMucHVzaChjaGFuZ2UpO1xuICAgICAgICBjaGFuZ2UgPSBzdGF0ZS5saW5lc1srK3N0YXRlLmluZGV4XTtcbiAgICAgIH1cbiAgICB9XG5cbiAgICBpZiAobWF0Y2guc3Vic3RyKDEpID09PSBjaGFuZ2Uuc3Vic3RyKDEpKSB7XG4gICAgICBjaGFuZ2VzLnB1c2goY2hhbmdlKTtcbiAgICAgIHN0YXRlLmluZGV4Kys7XG4gICAgfSBlbHNlIHtcbiAgICAgIGNvbmZsaWN0ZWQgPSB0cnVlO1xuICAgIH1cbiAgfVxuXG4gIGlmICgobWF0Y2hDaGFuZ2VzW21hdGNoSW5kZXhdIHx8ICcnKVswXSA9PT0gJysnXG4gICAgICAmJiBjb250ZXh0Q2hhbmdlcykge1xuICAgIGNvbmZsaWN0ZWQgPSB0cnVlO1xuICB9XG5cbiAgaWYgKGNvbmZsaWN0ZWQpIHtcbiAgICByZXR1cm4gY2hhbmdlcztcbiAgfVxuXG4gIHdoaWxlIChtYXRjaEluZGV4IDwgbWF0Y2hDaGFuZ2VzLmxlbmd0aCkge1xuICAgIG1lcmdlZC5wdXNoKG1hdGNoQ2hhbmdlc1ttYXRjaEluZGV4KytdKTtcbiAgfVxuXG4gIHJldHVybiB7XG4gICAgbWVyZ2VkLFxuICAgIGNoYW5nZXNcbiAgfTtcbn1cblxuZnVuY3Rpb24gYWxsUmVtb3ZlcyhjaGFuZ2VzKSB7XG4gIHJldHVybiBjaGFuZ2VzLnJlZHVjZShmdW5jdGlvbihwcmV2LCBjaGFuZ2UpIHtcbiAgICByZXR1cm4gcHJldiAmJiBjaGFuZ2VbMF0gPT09ICctJztcbiAgfSwgdHJ1ZSk7XG59XG5mdW5jdGlvbiBza2lwUmVtb3ZlU3VwZXJzZXQoc3RhdGUsIHJlbW92ZUNoYW5nZXMsIGRlbHRhKSB7XG4gIGZvciAobGV0IGkgPSAwOyBpIDwgZGVsdGE7IGkrKykge1xuICAgIGxldCBjaGFuZ2VDb250ZW50ID0gcmVtb3ZlQ2hhbmdlc1tyZW1vdmVDaGFuZ2VzLmxlbmd0aCAtIGRlbHRhICsgaV0uc3Vic3RyKDEpO1xuICAgIGlmIChzdGF0ZS5saW5lc1tzdGF0ZS5pbmRleCArIGldICE9PSAnICcgKyBjaGFuZ2VDb250ZW50KSB7XG4gICAgICByZXR1cm4gZmFsc2U7XG4gICAgfVxuICB9XG5cbiAgc3RhdGUuaW5kZXggKz0gZGVsdGE7XG4gIHJldHVybiB0cnVlO1xufVxuXG5mdW5jdGlvbiBjYWxjT2xkTmV3TGluZUNvdW50KGxpbmVzKSB7XG4gIGxldCBvbGRMaW5lcyA9IDA7XG4gIGxldCBuZXdMaW5lcyA9IDA7XG5cbiAgbGluZXMuZm9yRWFjaChmdW5jdGlvbihsaW5lKSB7XG4gICAgaWYgKHR5cGVvZiBsaW5lICE9PSAnc3RyaW5nJykge1xuICAgICAgbGV0IG15Q291bnQgPSBjYWxjT2xkTmV3TGluZUNvdW50KGxpbmUubWluZSk7XG4gICAgICBsZXQgdGhlaXJDb3VudCA9IGNhbGNPbGROZXdMaW5lQ291bnQobGluZS50aGVpcnMpO1xuXG4gICAgICBpZiAob2xkTGluZXMgIT09IHVuZGVmaW5lZCkge1xuICAgICAgICBpZiAobXlDb3VudC5vbGRMaW5lcyA9PT0gdGhlaXJDb3VudC5vbGRMaW5lcykge1xuICAgICAgICAgIG9sZExpbmVzICs9IG15Q291bnQub2xkTGluZXM7XG4gICAgICAgIH0gZWxzZSB7XG4gICAgICAgICAgb2xkTGluZXMgPSB1bmRlZmluZWQ7XG4gICAgICAgIH1cbiAgICAgIH1cblxuICAgICAgaWYgKG5ld0xpbmVzICE9PSB1bmRlZmluZWQpIHtcbiAgICAgICAgaWYgKG15Q291bnQubmV3TGluZXMgPT09IHRoZWlyQ291bnQubmV3TGluZXMpIHtcbiAgICAgICAgICBuZXdMaW5lcyArPSBteUNvdW50Lm5ld0xpbmVzO1xuICAgICAgICB9IGVsc2Uge1xuICAgICAgICAgIG5ld0xpbmVzID0gdW5kZWZpbmVkO1xuICAgICAgICB9XG4gICAgICB9XG4gICAgfSBlbHNlIHtcbiAgICAgIGlmIChuZXdMaW5lcyAhPT0gdW5kZWZpbmVkICYmIChsaW5lWzBdID09PSAnKycgfHwgbGluZVswXSA9PT0gJyAnKSkge1xuICAgICAgICBuZXdMaW5lcysrO1xuICAgICAgfVxuICAgICAgaWYgKG9sZExpbmVzICE9PSB1bmRlZmluZWQgJiYgKGxpbmVbMF0gPT09ICctJyB8fCBsaW5lWzBdID09PSAnICcpKSB7XG4gICAgICAgIG9sZExpbmVzKys7XG4gICAgICB9XG4gICAgfVxuICB9KTtcblxuICByZXR1cm4ge29sZExpbmVzLCBuZXdMaW5lc307XG59XG4iXX0=
-
-
-/***/ }),
-
-/***/ 15870:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.parsePatch = parsePatch;
-
-/*istanbul ignore end*/
-function parsePatch(uniDiff) {
-  /*istanbul ignore start*/
-  var
-  /*istanbul ignore end*/
-  options = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
-  var diffstr = uniDiff.split(/\r\n|[\n\v\f\r\x85]/),
-      delimiters = uniDiff.match(/\r\n|[\n\v\f\r\x85]/g) || [],
-      list = [],
-      i = 0;
-
-  function parseIndex() {
-    var index = {};
-    list.push(index); // Parse diff metadata
-
-    while (i < diffstr.length) {
-      var line = diffstr[i]; // File header found, end parsing diff metadata
-
-      if (/^(\-\-\-|\+\+\+|@@)\s/.test(line)) {
-        break;
-      } // Diff index
-
-
-      var header = /^(?:Index:|diff(?: -r \w+)+)\s+(.+?)\s*$/.exec(line);
-
-      if (header) {
-        index.index = header[1];
-      }
-
-      i++;
-    } // Parse file headers if they are defined. Unified diff requires them, but
-    // there's no technical issues to have an isolated hunk without file header
-
-
-    parseFileHeader(index);
-    parseFileHeader(index); // Parse hunks
-
-    index.hunks = [];
-
-    while (i < diffstr.length) {
-      var _line = diffstr[i];
-
-      if (/^(Index:|diff|\-\-\-|\+\+\+)\s/.test(_line)) {
-        break;
-      } else if (/^@@/.test(_line)) {
-        index.hunks.push(parseHunk());
-      } else if (_line && options.strict) {
-        // Ignore unexpected content unless in strict mode
-        throw new Error('Unknown line ' + (i + 1) + ' ' + JSON.stringify(_line));
-      } else {
-        i++;
-      }
-    }
-  } // Parses the --- and +++ headers, if none are found, no lines
-  // are consumed.
-
-
-  function parseFileHeader(index) {
-    var fileHeader = /^(---|\+\+\+)\s+(.*)$/.exec(diffstr[i]);
-
-    if (fileHeader) {
-      var keyPrefix = fileHeader[1] === '---' ? 'old' : 'new';
-      var data = fileHeader[2].split('\t', 2);
-      var fileName = data[0].replace(/\\\\/g, '\\');
-
-      if (/^".*"$/.test(fileName)) {
-        fileName = fileName.substr(1, fileName.length - 2);
-      }
-
-      index[keyPrefix + 'FileName'] = fileName;
-      index[keyPrefix + 'Header'] = (data[1] || '').trim();
-      i++;
-    }
-  } // Parses a hunk
-  // This assumes that we are at the start of a hunk.
-
-
-  function parseHunk() {
-    var chunkHeaderIndex = i,
-        chunkHeaderLine = diffstr[i++],
-        chunkHeader = chunkHeaderLine.split(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-    var hunk = {
-      oldStart: +chunkHeader[1],
-      oldLines: typeof chunkHeader[2] === 'undefined' ? 1 : +chunkHeader[2],
-      newStart: +chunkHeader[3],
-      newLines: typeof chunkHeader[4] === 'undefined' ? 1 : +chunkHeader[4],
-      lines: [],
-      linedelimiters: []
-    }; // Unified Diff Format quirk: If the chunk size is 0,
-    // the first number is one lower than one would expect.
-    // https://www.artima.com/weblogs/viewpost.jsp?thread=164293
-
-    if (hunk.oldLines === 0) {
-      hunk.oldStart += 1;
-    }
-
-    if (hunk.newLines === 0) {
-      hunk.newStart += 1;
-    }
-
-    var addCount = 0,
-        removeCount = 0;
-
-    for (; i < diffstr.length; i++) {
-      // Lines starting with '---' could be mistaken for the "remove line" operation
-      // But they could be the header for the next file. Therefore prune such cases out.
-      if (diffstr[i].indexOf('--- ') === 0 && i + 2 < diffstr.length && diffstr[i + 1].indexOf('+++ ') === 0 && diffstr[i + 2].indexOf('@@') === 0) {
-        break;
-      }
-
-      var operation = diffstr[i].length == 0 && i != diffstr.length - 1 ? ' ' : diffstr[i][0];
-
-      if (operation === '+' || operation === '-' || operation === ' ' || operation === '\\') {
-        hunk.lines.push(diffstr[i]);
-        hunk.linedelimiters.push(delimiters[i] || '\n');
-
-        if (operation === '+') {
-          addCount++;
-        } else if (operation === '-') {
-          removeCount++;
-        } else if (operation === ' ') {
-          addCount++;
-          removeCount++;
-        }
-      } else {
-        break;
-      }
-    } // Handle the empty block count case
-
-
-    if (!addCount && hunk.newLines === 1) {
-      hunk.newLines = 0;
-    }
-
-    if (!removeCount && hunk.oldLines === 1) {
-      hunk.oldLines = 0;
-    } // Perform optional sanity checking
-
-
-    if (options.strict) {
-      if (addCount !== hunk.newLines) {
-        throw new Error('Added line count did not match for hunk at line ' + (chunkHeaderIndex + 1));
-      }
-
-      if (removeCount !== hunk.oldLines) {
-        throw new Error('Removed line count did not match for hunk at line ' + (chunkHeaderIndex + 1));
-      }
-    }
-
-    return hunk;
-  }
-
-  while (i < diffstr.length) {
-    parseIndex();
-  }
-
-  return list;
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy9wYXRjaC9wYXJzZS5qcyJdLCJuYW1lcyI6WyJwYXJzZVBhdGNoIiwidW5pRGlmZiIsIm9wdGlvbnMiLCJkaWZmc3RyIiwic3BsaXQiLCJkZWxpbWl0ZXJzIiwibWF0Y2giLCJsaXN0IiwiaSIsInBhcnNlSW5kZXgiLCJpbmRleCIsInB1c2giLCJsZW5ndGgiLCJsaW5lIiwidGVzdCIsImhlYWRlciIsImV4ZWMiLCJwYXJzZUZpbGVIZWFkZXIiLCJodW5rcyIsInBhcnNlSHVuayIsInN0cmljdCIsIkVycm9yIiwiSlNPTiIsInN0cmluZ2lmeSIsImZpbGVIZWFkZXIiLCJrZXlQcmVmaXgiLCJkYXRhIiwiZmlsZU5hbWUiLCJyZXBsYWNlIiwic3Vic3RyIiwidHJpbSIsImNodW5rSGVhZGVySW5kZXgiLCJjaHVua0hlYWRlckxpbmUiLCJjaHVua0hlYWRlciIsImh1bmsiLCJvbGRTdGFydCIsIm9sZExpbmVzIiwibmV3U3RhcnQiLCJuZXdMaW5lcyIsImxpbmVzIiwibGluZWRlbGltaXRlcnMiLCJhZGRDb3VudCIsInJlbW92ZUNvdW50IiwiaW5kZXhPZiIsIm9wZXJhdGlvbiJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7O0FBQU8sU0FBU0EsVUFBVCxDQUFvQkMsT0FBcEIsRUFBMkM7QUFBQTtBQUFBO0FBQUE7QUFBZEMsRUFBQUEsT0FBYyx1RUFBSixFQUFJO0FBQ2hELE1BQUlDLE9BQU8sR0FBR0YsT0FBTyxDQUFDRyxLQUFSLENBQWMscUJBQWQsQ0FBZDtBQUFBLE1BQ0lDLFVBQVUsR0FBR0osT0FBTyxDQUFDSyxLQUFSLENBQWMsc0JBQWQsS0FBeUMsRUFEMUQ7QUFBQSxNQUVJQyxJQUFJLEdBQUcsRUFGWDtBQUFBLE1BR0lDLENBQUMsR0FBRyxDQUhSOztBQUtBLFdBQVNDLFVBQVQsR0FBc0I7QUFDcEIsUUFBSUMsS0FBSyxHQUFHLEVBQVo7QUFDQUgsSUFBQUEsSUFBSSxDQUFDSSxJQUFMLENBQVVELEtBQVYsRUFGb0IsQ0FJcEI7O0FB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QUwsS0FBa0IsQ0FBbkMsRUFBc0M7QUFDcENKLE1BQUFBLElBQUksQ0FBQ0ksUUFBTCxHQUFnQixDQUFoQjtBQUNEOztBQUNELFFBQUksQ0FBQ0ksV0FBRCxJQUFnQlIsSUFBSSxDQUFDRSxRQUFMLEtBQWtCLENBQXRDLEVBQXlDO0FBQ3ZDRixNQUFBQSxJQUFJLENBQUNFLFFBQUwsR0FBZ0IsQ0FBaEI7QUFDRCxLQTVEa0IsQ0E4RG5COzs7QUFDQSxRQUFJbEMsT0FBTyxDQUFDa0IsTUFBWixFQUFvQjtBQUNsQixVQUFJcUIsUUFBUSxLQUFLUCxJQUFJLENBQUNJLFFBQXRCLEVBQWdDO0FBQzlCLGNBQU0sSUFBSWpCLEtBQUosQ0FBVSxzREFBc0RVLGdCQUFnQixHQUFHLENBQXpFLENBQVYsQ0FBTjtBQUNEOztBQUNELFVBQUlXLFdBQVcsS0FBS1IsSUFBSSxDQUFDRSxRQUF6QixFQUFtQztBQUNqQyxjQUFNLElBQUlmLEtBQUosQ0FBVSx3REFBd0RVLGdCQUFnQixHQUFHLENBQTNFLENBQVYsQ0FBTjtBQUNEO0FBQ0Y7O0FBRUQsV0FBT0csSUFBUDtBQUNEOztBQUVELFNBQU8xQixDQUFDLEdBQUdMLE9BQU8sQ0FBQ1MsTUFBbkIsRUFBMkI7QUFDekJILElBQUFBLFVBQVU7QUFDWDs7QUFFRCxTQUFPRixJQUFQO0FBQ0QiLCJzb3VyY2VzQ29udGVudCI6WyJleHBvcnQgZnVuY3Rpb24gcGFyc2VQYXRjaCh1bmlEaWZmLCBvcHRpb25zID0ge30pIHtcbiAgbGV0IGRpZmZzdHIgPSB1bmlEaWZmLnNwbGl0KC9cXHJcXG58W1xcblxcdlxcZlxcclxceDg1XS8pLFxuICAgICAgZGVsaW1pdGVycyA9IHVuaURpZmYubWF0Y2goL1xcclxcbnxbXFxuXFx2XFxmXFxyXFx4ODVdL2cpIHx8IFtdLFxuICAgICAgbGlzdCA9IFtdLFxuICAgICAgaSA9IDA7XG5cbiAgZnVuY3Rpb24gcGFyc2VJbmRleCgpIHtcbiAgICBsZXQgaW5kZXggPSB7fTtcbiAgICBsaXN0LnB1c2goaW5kZXgpO1xuXG4gICAgLy8gUGFyc2UgZGlmZiBtZXRhZGF0YVxuICAgIHdoaWxlIChpIDwgZGlmZnN0ci5sZW5ndGgpIHtcbiAgICAgIGxldCBsaW5lID0gZGlmZnN0cltpXTtcblxuICAgICAgLy8gRmlsZSBoZWFkZXIgZm91bmQsIGVuZCBwYXJzaW5nIGRpZmYgbWV0YWRhdGFcbiAgICAgIGlmICgoL14oXFwtXFwtXFwtfFxcK1xcK1xcK3xAQClcXHMvKS50ZXN0KGxpbmUpKSB7XG4gICAgICAgIGJyZWFrO1xuICAgICAgfVxuXG4gICAgICAvLyBEaWZmIGluZGV4XG4gICAgICBsZXQgaGVhZGVyID0gKC9eKD86SW5kZXg6fGRpZmYoPzogLXIgXFx3KykrKVxccysoLis/KVxccyokLykuZXhlYyhsaW5lKTtcbiAgICAgIGlmIChoZWFkZXIpIHtcbiAgICAgICAgaW5kZXguaW5kZXggPSBoZWFkZXJbMV07XG4gICAgICB9XG5cbiAgICAgIGkrKztcbiAgICB9XG5cbiAgICAvLyBQYXJzZSBmaWxlIGhlYWRlcnMgaWYgdGhleSBhcmUgZGVmaW5lZC4gVW5pZmllZCBkaWZmIHJlcXVpcmVzIHRoZW0sIGJ1dFxuICAgIC8vIHRoZXJlJ3Mgbm8gdGVjaG5pY2FsIGlzc3VlcyB0byBoYXZlIGFuIGlzb2xhdGVkIGh1bmsgd2l0aG91dCBmaWxlIGhlYWRlclxuICAgIHBhcnNlRmlsZUhlYWRlcihpbmRleCk7XG4gICAgcGFyc2VGaWxlSGVhZGVyKGluZGV4KTtcblxuICAgIC8vIFBhcnNlIGh1bmtzXG4gICAgaW5kZXguaHVua3MgPSBbXTtcblxuICAgIHdoaWxlIChpIDwgZGlmZnN0ci5sZW5ndGgpIHtcbiAgICAgIGxldCBsaW5lID0gZGlmZnN0cltpXTtcblxuICAgICAgaWYgKCgvXihJbmRleDp8ZGlmZnxcXC1cXC1cXC18XFwrXFwrXFwrKVxccy8pLnRlc3QobGluZSkpIHtcbiAgICAgICAgYnJlYWs7XG4gICAgICB9IGVsc2UgaWYgKCgvXkBALykudGVzdChsaW5lKSkge1xuICAgICAgICBpbmRleC5odW5rcy5wdXNoKHBhcnNlSHVuaygpKTtcbiAgICAgIH0gZWxzZSBpZiAobGluZSAmJiBvcHRpb25zLnN0cmljdCkge1xuICAgICAgICAvLyBJZ25vcmUgdW5leHBlY3RlZCBjb250ZW50IHVubGVzcyBpbiBzdHJpY3QgbW9kZVxuICAgICAgICB0aHJvdyBuZXcgRXJyb3IoJ1Vua25vd24gbGluZSAnICsgKGkgKyAxKSArICcgJyArIEpTT04uc3RyaW5naWZ5KGxpbmUpKTtcbiAgICAgIH0gZWxzZSB7XG4gICAgICAgIGkrKztcbiAgICAgIH1cbiAgICB9XG4gIH1cblxuICAvLyBQYXJzZXMgdGhlIC0tLSBhbmQgKysrIGhlYWRlcnMsIGlmIG5vbmUgYXJlIGZvdW5kLCBubyBsaW5lc1xuICAvLyBhcmUgY29uc3VtZWQuXG4gIGZ1bmN0aW9uIHBhcnNlRmlsZUhlYWRlcihpbmRleCkge1xuICAgIGNvbnN0IGZpbGVIZWFkZXIgPSAoL14oLS0tfFxcK1xcK1xcKylcXHMrKC4qKSQvKS5leGVjKGRpZmZzdHJbaV0pO1xuICAgIGlmIChmaWxlSGVhZGVyKSB7XG4gICAgICBsZXQga2V5UHJlZml4ID0gZmlsZUhlYWRlclsxXSA9PT0gJy0tLScgPyAnb2xkJyA6ICduZXcnO1xuICAgICAgY29uc3QgZGF0YSA9IGZpbGVIZWFkZXJbMl0uc3BsaXQoJ1xcdCcsIDIpO1xuICAgICAgbGV0IGZpbGVOYW1lID0gZGF0YVswXS5yZXBsYWNlKC9cXFxcXFxcXC9nLCAnXFxcXCcpO1xuICAgICAgaWYgKCgvXlwiLipcIiQvKS50ZXN0KGZpbGVOYW1lKSkge1xuICAgICAgICBmaWxlTmFtZSA9IGZpbGVOYW1lLnN1YnN0cigxLCBmaWxlTmFtZS5sZW5ndGggLSAyKTtcbiAgICAgIH1cbiAgICAgIGluZGV4W2tleVByZWZpeCArICdGaWxlTmFtZSddID0gZmlsZU5hbWU7XG4gICAgICBpbmRleFtrZXlQcmVmaXggKyAnSGVhZGVyJ10gPSAoZGF0YVsxXSB8fCAnJykudHJpbSgpO1xuXG4gICAgICBpKys7XG4gICAgfVxuICB9XG5cbiAgLy8gUGFyc2VzIGEgaHVua1xuICAvLyBUaGlzIGFzc3VtZXMgdGhhdCB3ZSBhcmUgYXQgdGhlIHN0YXJ0IG9mIGEgaHVuay5cbiAgZnVuY3Rpb24gcGFyc2VIdW5rKCkge1xuICAgIGxldCBjaHVua0hlYWRlckluZGV4ID0gaSxcbiAgICAgICAgY2h1bmtIZWFkZXJMaW5lID0gZGlmZnN0cltpKytdLFxuICAgICAgICBjaHVua0hlYWRlciA9IGNodW5rSGVhZGVyTGluZS5zcGxpdCgvQEAgLShcXGQrKSg/OiwoXFxkKykpPyBcXCsoXFxkKykoPzosKFxcZCspKT8gQEAvKTtcblxuICAgIGxldCBodW5rID0ge1xuICAgICAgb2xkU3RhcnQ6ICtjaHVua0hlYWRlclsxXSxcbiAgICAgIG9sZExpbmVzOiB0eXBlb2YgY2h1bmtIZWFkZXJbMl0gPT09ICd1bmRlZmluZWQnID8gMSA6ICtjaHVua0hlYWRlclsyXSxcbiAgICAgIG5ld1N0YXJ0OiArY2h1bmtIZWFkZXJbM10sXG4gICAgICBuZXdMaW5lczogdHlwZW9mIGNodW5rSGVhZGVyWzRdID09PSAndW5kZWZpbmVkJyA/IDEgOiArY2h1bmtIZWFkZXJbNF0sXG4gICAgICBsaW5lczogW10sXG4gICAgICBsaW5lZGVsaW1pdGVyczogW11cbiAgICB9O1xuXG4gICAgLy8gVW5pZmllZCBEaWZmIEZvcm1hdCBxdWlyazogSWYgdGhlIGNodW5rIHNpemUgaXMgMCxcbiAgICAvLyB0aGUgZmlyc3QgbnVtYmVyIGlzIG9uZSBsb3dlciB0aGFuIG9uZSB3b3VsZCBleHBlY3QuXG4gICAgLy8gaHR0cHM6Ly93d3cuYXJ0aW1hLmNvbS93ZWJsb2dzL3ZpZXdwb3N0LmpzcD90aHJlYWQ9MTY0MjkzXG4gICAgaWYgKGh1bmsub2xkTGluZXMgPT09IDApIHtcbiAgICAgIGh1bmsub2xkU3RhcnQgKz0gMTtcbiAgICB9XG4gICAgaWYgKGh1bmsubmV3TGluZXMgPT09IDApIHtcbiAgICAgIGh1bmsubmV3U3RhcnQgKz0gMTtcbiAgICB9XG5cbiAgICBsZXQgYWRkQ291bnQgPSAwLFxuICAgICAgICByZW1vdmVDb3VudCA9IDA7XG4gICAgZm9yICg7IGkgPCBkaWZmc3RyLmxlbmd0aDsgaSsrKSB7XG4gICAgICAvLyBMaW5lcyBzdGFydGluZyB3aXRoICctLS0nIGNvdWxkIGJlIG1pc3Rha2VuIGZvciB0aGUgXCJyZW1vdmUgbGluZVwiIG9wZXJhdGlvblxuICAgICAgLy8gQnV0IHRoZXkgY291bGQgYmUgdGhlIGhlYWRlciBmb3IgdGhlIG5leHQgZmlsZS4gVGhlcmVmb3JlIHBydW5lIHN1Y2ggY2FzZXMgb3V0LlxuICAgICAgaWYgKGRpZmZzdHJbaV0uaW5kZXhPZignLS0tICcpID09PSAwXG4gICAgICAgICAgICAmJiAoaSArIDIgPCBkaWZmc3RyLmxlbmd0aClcbiAgICAgICAgICAgICYmIGRpZmZzdHJbaSArIDFdLmluZGV4T2YoJysrKyAnKSA9PT0gMFxuICAgICAgICAgICAgJiYgZGlmZnN0cltpICsgMl0uaW5kZXhPZignQEAnKSA9PT0gMCkge1xuICAgICAgICAgIGJyZWFrO1xuICAgICAgfVxuICAgICAgbGV0IG9wZXJhdGlvbiA9IChkaWZmc3RyW2ldLmxlbmd0aCA9PSAwICYmIGkgIT0gKGRpZmZzdHIubGVuZ3RoIC0gMSkpID8gJyAnIDogZGlmZnN0cltpXVswXTtcblxuICAgICAgaWYgKG9wZXJhdGlvbiA9PT0gJysnIHx8IG9wZXJhdGlvbiA9PT0gJy0nIHx8IG9wZXJhdGlvbiA9PT0gJyAnIHx8IG9wZXJhdGlvbiA9PT0gJ1xcXFwnKSB7XG4gICAgICAgIGh1bmsubGluZXMucHVzaChkaWZmc3RyW2ldKTtcbiAgICAgICAgaHVuay5saW5lZGVsaW1pdGVycy5wdXNoKGRlbGltaXRlcnNbaV0gfHwgJ1xcbicpO1xuXG4gICAgICAgIGlmIChvcGVyYXRpb24gPT09ICcrJykge1xuICAgICAgICAgIGFkZENvdW50Kys7XG4gICAgICAgIH0gZWxzZSBpZiAob3BlcmF0aW9uID09PSAnLScpIHtcbiAgICAgICAgICByZW1vdmVDb3VudCsrO1xuICAgICAgICB9IGVsc2UgaWYgKG9wZXJhdGlvbiA9PT0gJyAnKSB7XG4gICAgICAgICAgYWRkQ291bnQrKztcbiAgICAgICAgICByZW1vdmVDb3VudCsrO1xuICAgICAgICB9XG4gICAgICB9IGVsc2Uge1xuICAgICAgICBicmVhaztcbiAgICAgIH1cbiAgICB9XG5cbiAgICAvLyBIYW5kbGUgdGhlIGVtcHR5IGJsb2NrIGNvdW50IGNhc2VcbiAgICBpZiAoIWFkZENvdW50ICYmIGh1bmsubmV3TGluZXMgPT09IDEpIHtcbiAgICAgIGh1bmsubmV3TGluZXMgPSAwO1xuICAgIH1cbiAgICBpZiAoIXJlbW92ZUNvdW50ICYmIGh1bmsub2xkTGluZXMgPT09IDEpIHtcbiAgICAgIGh1bmsub2xkTGluZXMgPSAwO1xuICAgIH1cblxuICAgIC8vIFBlcmZvcm0gb3B0aW9uYWwgc2FuaXR5IGNoZWNraW5nXG4gICAgaWYgKG9wdGlvbnMuc3RyaWN0KSB7XG4gICAgICBpZiAoYWRkQ291bnQgIT09IGh1bmsubmV3TGluZXMpIHtcbiAgICAgICAgdGhyb3cgbmV3IEVycm9yKCdBZGRlZCBsaW5lIGNvdW50IGRpZCBub3QgbWF0Y2ggZm9yIGh1bmsgYXQgbGluZSAnICsgKGNodW5rSGVhZGVySW5kZXggKyAxKSk7XG4gICAgICB9XG4gICAgICBpZiAocmVtb3ZlQ291bnQgIT09IGh1bmsub2xkTGluZXMpIHtcbiAgICAgICAgdGhyb3cgbmV3IEVycm9yKCdSZW1vdmVkIGxpbmUgY291bnQgZGlkIG5vdCBtYXRjaCBmb3IgaHVuayBhdCBsaW5lICcgKyAoY2h1bmtIZWFkZXJJbmRleCArIDEpKTtcbiAgICAgIH1cbiAgICB9XG5cbiAgICByZXR1cm4gaHVuaztcbiAgfVxuXG4gIHdoaWxlIChpIDwgZGlmZnN0ci5sZW5ndGgpIHtcbiAgICBwYXJzZUluZGV4KCk7XG4gIH1cblxuICByZXR1cm4gbGlzdDtcbn1cbiJdfQ==
-
-
-/***/ }),
-
-/***/ 78935:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.arrayEqual = arrayEqual;
-exports.arrayStartsWith = arrayStartsWith;
-
-/*istanbul ignore end*/
-function arrayEqual(a, b) {
-  if (a.length !== b.length) {
-    return false;
-  }
-
-  return arrayStartsWith(a, b);
-}
-
-function arrayStartsWith(array, start) {
-  if (start.length > array.length) {
-    return false;
-  }
-
-  for (var i = 0; i < start.length; i++) {
-    if (start[i] !== array[i]) {
-      return false;
-    }
-  }
-
-  return true;
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy91dGlsL2FycmF5LmpzIl0sIm5hbWVzIjpbImFycmF5RXF1YWwiLCJhIiwiYiIsImxlbmd0aCIsImFycmF5U3RhcnRzV2l0aCIsImFycmF5Iiwic3RhcnQiLCJpIl0sIm1hcHBpbmdzIjoiOzs7Ozs7Ozs7O0FBQU8sU0FBU0EsVUFBVCxDQUFvQkMsQ0FBcEIsRUFBdUJDLENBQXZCLEVBQTBCO0FBQy9CLE1BQUlELENBQUMsQ0FBQ0UsTUFBRixLQUFhRCxDQUFDLENBQUNDLE1BQW5CLEVBQTJCO0FBQ3pCLFdBQU8sS0FBUDtBQUNEOztBQUVELFNBQU9DLGVBQWUsQ0FBQ0gsQ0FBRCxFQUFJQyxDQUFKLENBQXRCO0FBQ0Q7O0FBRU0sU0FBU0UsZUFBVCxDQUF5QkMsS0FBekIsRUFBZ0NDLEtBQWhDLEVBQXVDO0FBQzVDLE1BQUlBLEtBQUssQ0FBQ0gsTUFBTixHQUFlRSxLQUFLLENBQUNGLE1BQXpCLEVBQWlDO0FBQy9CLFdBQU8sS0FBUDtBQUNEOztBQUVELE9BQUssSUFBSUksQ0FBQyxHQUFHLENBQWIsRUFBZ0JBLENBQUMsR0FBR0QsS0FBSyxDQUFDSCxNQUExQixFQUFrQ0ksQ0FBQyxFQUFuQyxFQUF1QztBQUNyQyxRQUFJRCxLQUFLLENBQUNDLENBQUQsQ0FBTCxLQUFhRixLQUFLLENBQUNFLENBQUQsQ0FBdEIsRUFBMkI7QUFDekIsYUFBTyxLQUFQO0FBQ0Q7QUFDRjs7QUFFRCxTQUFPLElBQVA7QUFDRCIsInNvdXJjZXNDb250ZW50IjpbImV4cG9ydCBmdW5jdGlvbiBhcnJheUVxdWFsKGEsIGIpIHtcbiAgaWYgKGEubGVuZ3RoICE9PSBiLmxlbmd0aCkge1xuICAgIHJldHVybiBmYWxzZTtcbiAgfVxuXG4gIHJldHVybiBhcnJheVN0YXJ0c1dpdGgoYSwgYik7XG59XG5cbmV4cG9ydCBmdW5jdGlvbiBhcnJheVN0YXJ0c1dpdGgoYXJyYXksIHN0YXJ0KSB7XG4gIGlmIChzdGFydC5sZW5ndGggPiBhcnJheS5sZW5ndGgpIHtcbiAgICByZXR1cm4gZmFsc2U7XG4gIH1cblxuICBmb3IgKGxldCBpID0gMDsgaSA8IHN0YXJ0Lmxlbmd0aDsgaSsrKSB7XG4gICAgaWYgKHN0YXJ0W2ldICE9PSBhcnJheVtpXSkge1xuICAgICAgcmV0dXJuIGZhbHNlO1xuICAgIH1cbiAgfVxuXG4gIHJldHVybiB0cnVlO1xufVxuIl19
-
-
-/***/ }),
-
-/***/ 75512:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports["default"] = _default;
-
-/*istanbul ignore end*/
-// Iterator that traverses in the range of [min, max], stepping
-// by distance from a given start position. I.e. for [0, 4], with
-// start of 2, this will iterate 2, 3, 1, 4, 0.
-function
-/*istanbul ignore start*/
-_default
-/*istanbul ignore end*/
-(start, minLine, maxLine) {
-  var wantForward = true,
-      backwardExhausted = false,
-      forwardExhausted = false,
-      localOffset = 1;
-  return function iterator() {
-    if (wantForward && !forwardExhausted) {
-      if (backwardExhausted) {
-        localOffset++;
-      } else {
-        wantForward = false;
-      } // Check if trying to fit beyond text length, and if not, check it fits
-      // after offset location (or desired location on first iteration)
-
-
-      if (start + localOffset <= maxLine) {
-        return localOffset;
-      }
-
-      forwardExhausted = true;
-    }
-
-    if (!backwardExhausted) {
-      if (!forwardExhausted) {
-        wantForward = true;
-      } // Check if trying to fit before text beginning, and if not, check it fits
-      // before offset location
-
-
-      if (minLine <= start - localOffset) {
-        return -localOffset++;
-      }
-
-      backwardExhausted = true;
-      return iterator();
-    } // We tried to fit hunk before text beginning and beyond text length, then
-    // hunk can't fit on the text. Return undefined
-
-  };
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy91dGlsL2Rpc3RhbmNlLWl0ZXJhdG9yLmpzIl0sIm5hbWVzIjpbInN0YXJ0IiwibWluTGluZSIsIm1heExpbmUiLCJ3YW50Rm9yd2FyZCIsImJhY2t3YXJkRXhoYXVzdGVkIiwiZm9yd2FyZEV4aGF1c3RlZCIsImxvY2FsT2Zmc2V0IiwiaXRlcmF0b3IiXSwibWFwcGluZ3MiOiI7Ozs7Ozs7OztBQUFBO0FBQ0E7QUFDQTtBQUNlO0FBQUE7QUFBQTtBQUFBO0FBQUEsQ0FBU0EsS0FBVCxFQUFnQkMsT0FBaEIsRUFBeUJDLE9BQXpCLEVBQWtDO0FBQy9DLE1BQUlDLFdBQVcsR0FBRyxJQUFsQjtBQUFBLE1BQ0lDLGlCQUFpQixHQUFHLEtBRHhCO0FBQUEsTUFFSUMsZ0JBQWdCLEdBQUcsS0FGdkI7QUFBQSxNQUdJQyxXQUFXLEdBQUcsQ0FIbEI7QUFLQSxTQUFPLFNBQVNDLFFBQVQsR0FBb0I7QUFDekIsUUFBSUosV0FBVyxJQUFJLENBQUNFLGdCQUFwQixFQUFzQztBQUNwQyxVQUFJRCxpQkFBSixFQUF1QjtBQUNyQkUsUUFBQUEsV0FBVztBQUNaLE9BRkQsTUFFTztBQUNMSCxRQUFBQSxXQUFXLEdBQUcsS0FBZDtBQUNELE9BTG1DLENBT3BDO0FBQ0E7OztBQUNBLFVBQUlILEtBQUssR0FBR00sV0FBUixJQUF1QkosT0FBM0IsRUFBb0M7QUFDbEMsZUFBT0ksV0FBUDtBQUNEOztBQUVERCxNQUFBQSxnQkFBZ0IsR0FBRyxJQUFuQjtBQUNEOztBQUVELFFBQUksQ0FBQ0QsaUJBQUwsRUFBd0I7QUFDdEIsVUFBSSxDQUFDQyxnQkFBTCxFQUF1QjtBQUNyQkYsUUFBQUEsV0FBVyxHQUFHLElBQWQ7QUFDRCxPQUhxQixDQUt0QjtBQUNBOzs7QUFDQSxVQUFJRixPQUFPLElBQUlELEtBQUssR0FBR00sV0FBdkIsRUFBb0M7QUFDbEMsZUFBTyxDQUFDQSxXQUFXLEVBQW5CO0FBQ0Q7O0FBRURGLE1BQUFBLGlCQUFpQixHQUFHLElBQXBCO0FBQ0EsYUFBT0csUUFBUSxFQUFmO0FBQ0QsS0E5QndCLENBZ0N6QjtBQUNBOztBQUNELEdBbENEO0FBbUNEIiwic291cmNlc0NvbnRlbnQiOlsiLy8gSXRlcmF0b3IgdGhhdCB0cmF2ZXJzZXMgaW4gdGhlIHJhbmdlIG9mIFttaW4sIG1heF0sIHN0ZXBwaW5nXG4vLyBieSBkaXN0YW5jZSBmcm9tIGEgZ2l2ZW4gc3RhcnQgcG9zaXRpb24uIEkuZS4gZm9yIFswLCA0XSwgd2l0aFxuLy8gc3RhcnQgb2YgMiwgdGhpcyB3aWxsIGl0ZXJhdGUgMiwgMywgMSwgNCwgMC5cbmV4cG9ydCBkZWZhdWx0IGZ1bmN0aW9uKHN0YXJ0LCBtaW5MaW5lLCBtYXhMaW5lKSB7XG4gIGxldCB3YW50Rm9yd2FyZCA9IHRydWUsXG4gICAgICBiYWNrd2FyZEV4aGF1c3RlZCA9IGZhbHNlLFxuICAgICAgZm9yd2FyZEV4aGF1c3RlZCA9IGZhbHNlLFxuICAgICAgbG9jYWxPZmZzZXQgPSAxO1xuXG4gIHJldHVybiBmdW5jdGlvbiBpdGVyYXRvcigpIHtcbiAgICBpZiAod2FudEZvcndhcmQgJiYgIWZvcndhcmRFeGhhdXN0ZWQpIHtcbiAgICAgIGlmIChiYWNrd2FyZEV4aGF1c3RlZCkge1xuICAgICAgICBsb2NhbE9mZnNldCsrO1xuICAgICAgfSBlbHNlIHtcbiAgICAgICAgd2FudEZvcndhcmQgPSBmYWxzZTtcbiAgICAgIH1cblxuICAgICAgLy8gQ2hlY2sgaWYgdHJ5aW5nIHRvIGZpdCBiZXlvbmQgdGV4dCBsZW5ndGgsIGFuZCBpZiBub3QsIGNoZWNrIGl0IGZpdHNcbiAgICAgIC8vIGFmdGVyIG9mZnNldCBsb2NhdGlvbiAob3IgZGVzaXJlZCBsb2NhdGlvbiBvbiBmaXJzdCBpdGVyYXRpb24pXG4gICAgICBpZiAoc3RhcnQgKyBsb2NhbE9mZnNldCA8PSBtYXhMaW5lKSB7XG4gICAgICAgIHJldHVybiBsb2NhbE9mZnNldDtcbiAgICAgIH1cblxuICAgICAgZm9yd2FyZEV4aGF1c3RlZCA9IHRydWU7XG4gICAgfVxuXG4gICAgaWYgKCFiYWNrd2FyZEV4aGF1c3RlZCkge1xuICAgICAgaWYgKCFmb3J3YXJkRXhoYXVzdGVkKSB7XG4gICAgICAgIHdhbnRGb3J3YXJkID0gdHJ1ZTtcbiAgICAgIH1cblxuICAgICAgLy8gQ2hlY2sgaWYgdHJ5aW5nIHRvIGZpdCBiZWZvcmUgdGV4dCBiZWdpbm5pbmcsIGFuZCBpZiBub3QsIGNoZWNrIGl0IGZpdHNcbiAgICAgIC8vIGJlZm9yZSBvZmZzZXQgbG9jYXRpb25cbiAgICAgIGlmIChtaW5MaW5lIDw9IHN0YXJ0IC0gbG9jYWxPZmZzZXQpIHtcbiAgICAgICAgcmV0dXJuIC1sb2NhbE9mZnNldCsrO1xuICAgICAgfVxuXG4gICAgICBiYWNrd2FyZEV4aGF1c3RlZCA9IHRydWU7XG4gICAgICByZXR1cm4gaXRlcmF0b3IoKTtcbiAgICB9XG5cbiAgICAvLyBXZSB0cmllZCB0byBmaXQgaHVuayBiZWZvcmUgdGV4dCBiZWdpbm5pbmcgYW5kIGJleW9uZCB0ZXh0IGxlbmd0aCwgdGhlblxuICAgIC8vIGh1bmsgY2FuJ3QgZml0IG9uIHRoZSB0ZXh0LiBSZXR1cm4gdW5kZWZpbmVkXG4gIH07XG59XG4iXX0=
-
-
-/***/ }),
-
-/***/ 45704:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-/*istanbul ignore start*/
-
-
-Object.defineProperty(exports, "__esModule", ({
-  value: true
-}));
-exports.generateOptions = generateOptions;
-
-/*istanbul ignore end*/
-function generateOptions(options, defaults) {
-  if (typeof options === 'function') {
-    defaults.callback = options;
-  } else if (options) {
-    for (var name in options) {
-      /* istanbul ignore else */
-      if (options.hasOwnProperty(name)) {
-        defaults[name] = options[name];
-      }
-    }
-  }
-
-  return defaults;
-}
-//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJzb3VyY2VzIjpbIi4uLy4uL3NyYy91dGlsL3BhcmFtcy5qcyJdLCJuYW1lcyI6WyJnZW5lcmF0ZU9wdGlvbnMiLCJvcHRpb25zIiwiZGVmYXVsdHMiLCJjYWxsYmFjayIsIm5hbWUiLCJoYXNPd25Qcm9wZXJ0eSJdLCJtYXBwaW5ncyI6Ijs7Ozs7Ozs7O0FBQU8sU0FBU0EsZUFBVCxDQUF5QkMsT0FBekIsRUFBa0NDLFFBQWxDLEVBQTRDO0FBQ2pELE1BQUksT0FBT0QsT0FBUCxLQUFtQixVQUF2QixFQUFtQztBQUNqQ0MsSUFBQUEsUUFBUSxDQUFDQyxRQUFULEdBQW9CRixPQUFwQjtBQUNELEdBRkQsTUFFTyxJQUFJQSxPQUFKLEVBQWE7QUFDbEIsU0FBSyxJQUFJRyxJQUFULElBQWlCSCxPQUFqQixFQUEwQjtBQUN4QjtBQUNBLFVBQUlBLE9BQU8sQ0FBQ0ksY0FBUixDQUF1QkQsSUFBdkIsQ0FBSixFQUFrQztBQUNoQ0YsUUFBQUEsUUFBUSxDQUFDRSxJQUFELENBQVIsR0FBaUJILE9BQU8sQ0FBQ0csSUFBRCxDQUF4QjtBQUNEO0FBQ0Y7QUFDRjs7QUFDRCxTQUFPRixRQUFQO0FBQ0QiLCJzb3VyY2VzQ29udGVudCI6WyJleHBvcnQgZnVuY3Rpb24gZ2VuZXJhdGVPcHRpb25zKG9wdGlvbnMsIGRlZmF1bHRzKSB7XG4gIGlmICh0eXBlb2Ygb3B0aW9ucyA9PT0gJ2Z1bmN0aW9uJykge1xuICAgIGRlZmF1bHRzLmNhbGxiYWNrID0gb3B0aW9ucztcbiAgfSBlbHNlIGlmIChvcHRpb25zKSB7XG4gICAgZm9yIChsZXQgbmFtZSBpbiBvcHRpb25zKSB7XG4gICAgICAvKiBpc3RhbmJ1bCBpZ25vcmUgZWxzZSAqL1xuICAgICAgaWYgKG9wdGlvbnMuaGFzT3duUHJvcGVydHkobmFtZSkpIHtcbiAgICAgICAgZGVmYXVsdHNbbmFtZV0gPSBvcHRpb25zW25hbWVdO1xuICAgICAgfVxuICAgIH1cbiAgfVxuICByZXR1cm4gZGVmYXVsdHM7XG59XG4iXX0=
 
 
 /***/ }),
@@ -37525,51 +32014,48 @@ module.exports = value => {
 "use strict";
 
 
+const loader = __nccwpck_require__(51161)
+const dumper = __nccwpck_require__(68866)
 
-var loader = __nccwpck_require__(51161);
-var dumper = __nccwpck_require__(68866);
-
-
-function renamed(from, to) {
+function renamed (from, to) {
   return function () {
     throw new Error('Function yaml.' + from + ' is removed in js-yaml 4. ' +
-      'Use yaml.' + to + ' instead, which is now safe by default.');
-  };
+      'Use yaml.' + to + ' instead, which is now safe by default.')
+  }
 }
 
-
-module.exports.Type = __nccwpck_require__(6073);
-module.exports.Schema = __nccwpck_require__(21082);
-module.exports.FAILSAFE_SCHEMA = __nccwpck_require__(28562);
-module.exports.JSON_SCHEMA = __nccwpck_require__(1035);
-module.exports.CORE_SCHEMA = __nccwpck_require__(12011);
-module.exports.DEFAULT_SCHEMA = __nccwpck_require__(18759);
-module.exports.load                = loader.load;
-module.exports.loadAll             = loader.loadAll;
-module.exports.dump                = dumper.dump;
-module.exports.YAMLException = __nccwpck_require__(68179);
+module.exports.Type = __nccwpck_require__(6073)
+module.exports.Schema = __nccwpck_require__(21082)
+module.exports.FAILSAFE_SCHEMA = __nccwpck_require__(28562)
+module.exports.JSON_SCHEMA = __nccwpck_require__(1035)
+module.exports.CORE_SCHEMA = __nccwpck_require__(12011)
+module.exports.DEFAULT_SCHEMA = __nccwpck_require__(18759)
+module.exports.load = loader.load
+module.exports.loadAll = loader.loadAll
+module.exports.dump = dumper.dump
+module.exports.YAMLException = __nccwpck_require__(68179)
 
 // Re-export all types in case user wants to create custom schema
 module.exports.types = {
-  binary:    __nccwpck_require__(77900),
-  float:     __nccwpck_require__(42705),
-  map:       __nccwpck_require__(86150),
-  null:      __nccwpck_require__(20721),
-  pairs:     __nccwpck_require__(96860),
-  set:       __nccwpck_require__(79548),
+  binary: __nccwpck_require__(77900),
+  float: __nccwpck_require__(42705),
+  map: __nccwpck_require__(86150),
+  null: __nccwpck_require__(20721),
+  pairs: __nccwpck_require__(96860),
+  set: __nccwpck_require__(79548),
   timestamp: __nccwpck_require__(99212),
-  bool:      __nccwpck_require__(64993),
-  int:       __nccwpck_require__(11615),
-  merge:     __nccwpck_require__(86104),
-  omap:      __nccwpck_require__(19046),
-  seq:       __nccwpck_require__(67283),
-  str:       __nccwpck_require__(23619)
-};
+  bool: __nccwpck_require__(64993),
+  int: __nccwpck_require__(11615),
+  merge: __nccwpck_require__(86104),
+  omap: __nccwpck_require__(19046),
+  seq: __nccwpck_require__(67283),
+  str: __nccwpck_require__(23619)
+}
 
 // Removed functions from JS-YAML 3.0.x
-module.exports.safeLoad            = renamed('safeLoad', 'load');
-module.exports.safeLoadAll         = renamed('safeLoadAll', 'loadAll');
-module.exports.safeDump            = renamed('safeDump', 'dump');
+module.exports.safeLoad = renamed('safeLoad', 'load')
+module.exports.safeLoadAll = renamed('safeLoadAll', 'loadAll')
+module.exports.safeDump = renamed('safeDump', 'dump')
 
 
 /***/ }),
@@ -37580,63 +32066,54 @@ module.exports.safeDump            = renamed('safeDump', 'dump');
 "use strict";
 
 
-
-function isNothing(subject) {
-  return (typeof subject === 'undefined') || (subject === null);
+function isNothing (subject) {
+  return (typeof subject === 'undefined') || (subject === null)
 }
 
-
-function isObject(subject) {
-  return (typeof subject === 'object') && (subject !== null);
+function isObject (subject) {
+  return (typeof subject === 'object') && (subject !== null)
 }
 
+function toArray (sequence) {
+  if (Array.isArray(sequence)) return sequence
+  else if (isNothing(sequence)) return []
 
-function toArray(sequence) {
-  if (Array.isArray(sequence)) return sequence;
-  else if (isNothing(sequence)) return [];
-
-  return [ sequence ];
+  return [sequence]
 }
 
-
-function extend(target, source) {
-  var index, length, key, sourceKeys;
-
+function extend (target, source) {
   if (source) {
-    sourceKeys = Object.keys(source);
+    const sourceKeys = Object.keys(source)
 
-    for (index = 0, length = sourceKeys.length; index < length; index += 1) {
-      key = sourceKeys[index];
-      target[key] = source[key];
+    for (let index = 0, length = sourceKeys.length; index < length; index += 1) {
+      const key = sourceKeys[index]
+      target[key] = source[key]
     }
   }
 
-  return target;
+  return target
 }
 
+function repeat (string, count) {
+  let result = ''
 
-function repeat(string, count) {
-  var result = '', cycle;
-
-  for (cycle = 0; cycle < count; cycle += 1) {
-    result += string;
+  for (let cycle = 0; cycle < count; cycle += 1) {
+    result += string
   }
 
-  return result;
+  return result
 }
 
-
-function isNegativeZero(number) {
-  return (number === 0) && (Number.NEGATIVE_INFINITY === 1 / number);
+function isNegativeZero (number) {
+  return (number === 0) && (Number.NEGATIVE_INFINITY === 1 / number)
 }
 
-
-module.exports.isNothing      = isNothing;
-module.exports.isObject       = isObject;
-module.exports.toArray        = toArray;
-module.exports.repeat         = repeat;
-module.exports.isNegativeZero = isNegativeZero;
-module.exports.extend         = extend;
+module.exports.isNothing = isNothing
+module.exports.isObject = isObject
+module.exports.toArray = toArray
+module.exports.repeat = repeat
+module.exports.isNegativeZero = isNegativeZero
+module.exports.extend = extend
 
 
 /***/ }),
@@ -37647,203 +32124,196 @@ module.exports.extend         = extend;
 "use strict";
 
 
-/*eslint-disable no-use-before-define*/
+const common = __nccwpck_require__(26829)
+const YAMLException = __nccwpck_require__(68179)
+const DEFAULT_SCHEMA = __nccwpck_require__(18759)
 
-var common              = __nccwpck_require__(26829);
-var YAMLException       = __nccwpck_require__(68179);
-var DEFAULT_SCHEMA      = __nccwpck_require__(18759);
+const _toString = Object.prototype.toString
+const _hasOwnProperty = Object.prototype.hasOwnProperty
 
-var _toString       = Object.prototype.toString;
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
+const CHAR_BOM = 0xFEFF
+const CHAR_TAB = 0x09 /* Tab */
+const CHAR_LINE_FEED = 0x0A /* LF */
+const CHAR_CARRIAGE_RETURN = 0x0D /* CR */
+const CHAR_SPACE = 0x20 /* Space */
+const CHAR_EXCLAMATION = 0x21 /* ! */
+const CHAR_DOUBLE_QUOTE = 0x22 /* " */
+const CHAR_SHARP = 0x23 /* # */
+const CHAR_PERCENT = 0x25 /* % */
+const CHAR_AMPERSAND = 0x26 /* & */
+const CHAR_SINGLE_QUOTE = 0x27 /* ' */
+const CHAR_ASTERISK = 0x2A /* * */
+const CHAR_COMMA = 0x2C /* , */
+const CHAR_MINUS = 0x2D /* - */
+const CHAR_COLON = 0x3A /* : */
+const CHAR_EQUALS = 0x3D /* = */
+const CHAR_GREATER_THAN = 0x3E /* > */
+const CHAR_QUESTION = 0x3F /* ? */
+const CHAR_COMMERCIAL_AT = 0x40 /* @ */
+const CHAR_LEFT_SQUARE_BRACKET = 0x5B /* [ */
+const CHAR_RIGHT_SQUARE_BRACKET = 0x5D /* ] */
+const CHAR_GRAVE_ACCENT = 0x60 /* ` */
+const CHAR_LEFT_CURLY_BRACKET = 0x7B /* { */
+const CHAR_VERTICAL_LINE = 0x7C /* | */
+const CHAR_RIGHT_CURLY_BRACKET = 0x7D /* } */
 
-var CHAR_BOM                  = 0xFEFF;
-var CHAR_TAB                  = 0x09; /* Tab */
-var CHAR_LINE_FEED            = 0x0A; /* LF */
-var CHAR_CARRIAGE_RETURN      = 0x0D; /* CR */
-var CHAR_SPACE                = 0x20; /* Space */
-var CHAR_EXCLAMATION          = 0x21; /* ! */
-var CHAR_DOUBLE_QUOTE         = 0x22; /* " */
-var CHAR_SHARP                = 0x23; /* # */
-var CHAR_PERCENT              = 0x25; /* % */
-var CHAR_AMPERSAND            = 0x26; /* & */
-var CHAR_SINGLE_QUOTE         = 0x27; /* ' */
-var CHAR_ASTERISK             = 0x2A; /* * */
-var CHAR_COMMA                = 0x2C; /* , */
-var CHAR_MINUS                = 0x2D; /* - */
-var CHAR_COLON                = 0x3A; /* : */
-var CHAR_EQUALS               = 0x3D; /* = */
-var CHAR_GREATER_THAN         = 0x3E; /* > */
-var CHAR_QUESTION             = 0x3F; /* ? */
-var CHAR_COMMERCIAL_AT        = 0x40; /* @ */
-var CHAR_LEFT_SQUARE_BRACKET  = 0x5B; /* [ */
-var CHAR_RIGHT_SQUARE_BRACKET = 0x5D; /* ] */
-var CHAR_GRAVE_ACCENT         = 0x60; /* ` */
-var CHAR_LEFT_CURLY_BRACKET   = 0x7B; /* { */
-var CHAR_VERTICAL_LINE        = 0x7C; /* | */
-var CHAR_RIGHT_CURLY_BRACKET  = 0x7D; /* } */
+const ESCAPE_SEQUENCES = {}
 
-var ESCAPE_SEQUENCES = {};
+ESCAPE_SEQUENCES[0x00] = '\\0'
+ESCAPE_SEQUENCES[0x07] = '\\a'
+ESCAPE_SEQUENCES[0x08] = '\\b'
+ESCAPE_SEQUENCES[0x09] = '\\t'
+ESCAPE_SEQUENCES[0x0A] = '\\n'
+ESCAPE_SEQUENCES[0x0B] = '\\v'
+ESCAPE_SEQUENCES[0x0C] = '\\f'
+ESCAPE_SEQUENCES[0x0D] = '\\r'
+ESCAPE_SEQUENCES[0x1B] = '\\e'
+ESCAPE_SEQUENCES[0x22] = '\\"'
+ESCAPE_SEQUENCES[0x5C] = '\\\\'
+ESCAPE_SEQUENCES[0x85] = '\\N'
+ESCAPE_SEQUENCES[0xA0] = '\\_'
+ESCAPE_SEQUENCES[0x2028] = '\\L'
+ESCAPE_SEQUENCES[0x2029] = '\\P'
 
-ESCAPE_SEQUENCES[0x00]   = '\\0';
-ESCAPE_SEQUENCES[0x07]   = '\\a';
-ESCAPE_SEQUENCES[0x08]   = '\\b';
-ESCAPE_SEQUENCES[0x09]   = '\\t';
-ESCAPE_SEQUENCES[0x0A]   = '\\n';
-ESCAPE_SEQUENCES[0x0B]   = '\\v';
-ESCAPE_SEQUENCES[0x0C]   = '\\f';
-ESCAPE_SEQUENCES[0x0D]   = '\\r';
-ESCAPE_SEQUENCES[0x1B]   = '\\e';
-ESCAPE_SEQUENCES[0x22]   = '\\"';
-ESCAPE_SEQUENCES[0x5C]   = '\\\\';
-ESCAPE_SEQUENCES[0x85]   = '\\N';
-ESCAPE_SEQUENCES[0xA0]   = '\\_';
-ESCAPE_SEQUENCES[0x2028] = '\\L';
-ESCAPE_SEQUENCES[0x2029] = '\\P';
-
-var DEPRECATED_BOOLEANS_SYNTAX = [
+const DEPRECATED_BOOLEANS_SYNTAX = [
   'y', 'Y', 'yes', 'Yes', 'YES', 'on', 'On', 'ON',
   'n', 'N', 'no', 'No', 'NO', 'off', 'Off', 'OFF'
-];
+]
 
-var DEPRECATED_BASE60_SYNTAX = /^[-+]?[0-9_]+(?::[0-9_]+)+(?:\.[0-9_]*)?$/;
+const DEPRECATED_BASE60_SYNTAX = /^[-+]?[0-9_]+(?::[0-9_]+)+(?:\.[0-9_]*)?$/
 
-function compileStyleMap(schema, map) {
-  var result, keys, index, length, tag, style, type;
+function compileStyleMap (schema, map) {
+  if (map === null) return {}
 
-  if (map === null) return {};
+  const result = {}
+  const keys = Object.keys(map)
 
-  result = {};
-  keys = Object.keys(map);
-
-  for (index = 0, length = keys.length; index < length; index += 1) {
-    tag = keys[index];
-    style = String(map[tag]);
+  for (let index = 0, length = keys.length; index < length; index += 1) {
+    let tag = keys[index]
+    let style = String(map[tag])
 
     if (tag.slice(0, 2) === '!!') {
-      tag = 'tag:yaml.org,2002:' + tag.slice(2);
+      tag = 'tag:yaml.org,2002:' + tag.slice(2)
     }
-    type = schema.compiledTypeMap['fallback'][tag];
+    const type = schema.compiledTypeMap['fallback'][tag]
 
     if (type && _hasOwnProperty.call(type.styleAliases, style)) {
-      style = type.styleAliases[style];
+      style = type.styleAliases[style]
     }
 
-    result[tag] = style;
+    result[tag] = style
   }
 
-  return result;
+  return result
 }
 
-function encodeHex(character) {
-  var string, handle, length;
+function encodeHex (character) {
+  let handle
+  let length
 
-  string = character.toString(16).toUpperCase();
+  const string = character.toString(16).toUpperCase()
 
   if (character <= 0xFF) {
-    handle = 'x';
-    length = 2;
+    handle = 'x'
+    length = 2
   } else if (character <= 0xFFFF) {
-    handle = 'u';
-    length = 4;
+    handle = 'u'
+    length = 4
   } else if (character <= 0xFFFFFFFF) {
-    handle = 'U';
-    length = 8;
+    handle = 'U'
+    length = 8
   } else {
-    throw new YAMLException('code point within a string may not be greater than 0xFFFFFFFF');
+    throw new YAMLException('code point within a string may not be greater than 0xFFFFFFFF')
   }
 
-  return '\\' + handle + common.repeat('0', length - string.length) + string;
+  return '\\' + handle + common.repeat('0', length - string.length) + string
 }
 
+const QUOTING_TYPE_SINGLE = 1
+const QUOTING_TYPE_DOUBLE = 2
 
-var QUOTING_TYPE_SINGLE = 1,
-    QUOTING_TYPE_DOUBLE = 2;
+function State (options) {
+  this.schema = options['schema'] || DEFAULT_SCHEMA
+  this.indent = Math.max(1, (options['indent'] || 2))
+  this.noArrayIndent = options['noArrayIndent'] || false
+  this.skipInvalid = options['skipInvalid'] || false
+  this.flowLevel = (common.isNothing(options['flowLevel']) ? -1 : options['flowLevel'])
+  this.styleMap = compileStyleMap(this.schema, options['styles'] || null)
+  this.sortKeys = options['sortKeys'] || false
+  this.lineWidth = options['lineWidth'] || 80
+  this.noRefs = options['noRefs'] || false
+  this.noCompatMode = options['noCompatMode'] || false
+  this.condenseFlow = options['condenseFlow'] || false
+  this.quotingType = options['quotingType'] === '"' ? QUOTING_TYPE_DOUBLE : QUOTING_TYPE_SINGLE
+  this.forceQuotes = options['forceQuotes'] || false
+  this.replacer = typeof options['replacer'] === 'function' ? options['replacer'] : null
 
-function State(options) {
-  this.schema        = options['schema'] || DEFAULT_SCHEMA;
-  this.indent        = Math.max(1, (options['indent'] || 2));
-  this.noArrayIndent = options['noArrayIndent'] || false;
-  this.skipInvalid   = options['skipInvalid'] || false;
-  this.flowLevel     = (common.isNothing(options['flowLevel']) ? -1 : options['flowLevel']);
-  this.styleMap      = compileStyleMap(this.schema, options['styles'] || null);
-  this.sortKeys      = options['sortKeys'] || false;
-  this.lineWidth     = options['lineWidth'] || 80;
-  this.noRefs        = options['noRefs'] || false;
-  this.noCompatMode  = options['noCompatMode'] || false;
-  this.condenseFlow  = options['condenseFlow'] || false;
-  this.quotingType   = options['quotingType'] === '"' ? QUOTING_TYPE_DOUBLE : QUOTING_TYPE_SINGLE;
-  this.forceQuotes   = options['forceQuotes'] || false;
-  this.replacer      = typeof options['replacer'] === 'function' ? options['replacer'] : null;
+  this.implicitTypes = this.schema.compiledImplicit
+  this.explicitTypes = this.schema.compiledExplicit
 
-  this.implicitTypes = this.schema.compiledImplicit;
-  this.explicitTypes = this.schema.compiledExplicit;
+  this.tag = null
+  this.result = ''
 
-  this.tag = null;
-  this.result = '';
-
-  this.duplicates = [];
-  this.usedDuplicates = null;
+  this.duplicates = []
+  this.usedDuplicates = null
 }
 
 // Indents every line in a string. Empty lines (\n only) are not indented.
-function indentString(string, spaces) {
-  var ind = common.repeat(' ', spaces),
-      position = 0,
-      next = -1,
-      result = '',
-      line,
-      length = string.length;
+function indentString (string, spaces) {
+  const ind = common.repeat(' ', spaces)
+  let position = 0
+  let result = ''
+  const length = string.length
 
   while (position < length) {
-    next = string.indexOf('\n', position);
+    let line
+    const next = string.indexOf('\n', position)
     if (next === -1) {
-      line = string.slice(position);
-      position = length;
+      line = string.slice(position)
+      position = length
     } else {
-      line = string.slice(position, next + 1);
-      position = next + 1;
+      line = string.slice(position, next + 1)
+      position = next + 1
     }
 
-    if (line.length && line !== '\n') result += ind;
+    if (line.length && line !== '\n') result += ind
 
-    result += line;
+    result += line
   }
 
-  return result;
+  return result
 }
 
-function generateNextLine(state, level) {
-  return '\n' + common.repeat(' ', state.indent * level);
+function generateNextLine (state, level) {
+  return '\n' + common.repeat(' ', state.indent * level)
 }
 
-function testImplicitResolving(state, str) {
-  var index, length, type;
-
-  for (index = 0, length = state.implicitTypes.length; index < length; index += 1) {
-    type = state.implicitTypes[index];
+function testImplicitResolving (state, str) {
+  for (let index = 0, length = state.implicitTypes.length; index < length; index += 1) {
+    const type = state.implicitTypes[index]
 
     if (type.resolve(str)) {
-      return true;
+      return true
     }
   }
 
-  return false;
+  return false
 }
 
 // [33] s-white ::= s-space | s-tab
-function isWhitespace(c) {
-  return c === CHAR_SPACE || c === CHAR_TAB;
+function isWhitespace (c) {
+  return c === CHAR_SPACE || c === CHAR_TAB
 }
 
 // Returns true if the character can be printed without escaping.
 // From YAML 1.2: "any allowed characters known to be non-printable
 // should also be escaped. [However,] This isn’t mandatory"
 // Derived from nb-char - \t - #x85 - #xA0 - #x2028 - #x2029.
-function isPrintable(c) {
-  return  (0x00020 <= c && c <= 0x00007E)
-      || ((0x000A1 <= c && c <= 0x00D7FF) && c !== 0x2028 && c !== 0x2029)
-      || ((0x0E000 <= c && c <= 0x00FFFD) && c !== CHAR_BOM)
-      ||  (0x10000 <= c && c <= 0x10FFFF);
+function isPrintable (c) {
+  return (c >= 0x00020 && c <= 0x00007E) ||
+    ((c >= 0x000A1 && c <= 0x00D7FF) && c !== 0x2028 && c !== 0x2029) ||
+    ((c >= 0x0E000 && c <= 0x00FFFD) && c !== CHAR_BOM) ||
+    (c >= 0x10000 && c <= 0x10FFFF)
 }
 
 // [34] ns-char ::= nb-char - s-white
@@ -37851,12 +32321,12 @@ function isPrintable(c) {
 // [26] b-char  ::= b-line-feed | b-carriage-return
 // Including s-white (for some reason, examples doesn't match specs in this aspect)
 // ns-char ::= c-printable - b-line-feed - b-carriage-return - c-byte-order-mark
-function isNsCharOrWhitespace(c) {
-  return isPrintable(c)
-    && c !== CHAR_BOM
+function isNsCharOrWhitespace (c) {
+  return isPrintable(c) &&
+    c !== CHAR_BOM &&
     // - b-char
-    && c !== CHAR_CARRIAGE_RETURN
-    && c !== CHAR_LINE_FEED;
+    c !== CHAR_CARRIAGE_RETURN &&
+    c !== CHAR_LINE_FEED
 }
 
 // [127]  ns-plain-safe(c) ::= c = flow-out  ⇒ ns-plain-safe-out
@@ -37868,91 +32338,96 @@ function isNsCharOrWhitespace(c) {
 // [130]  ns-plain-char(c) ::=  ( ns-plain-safe(c) - “:” - “#” )
 //                            | ( /* An ns-char preceding */ “#” )
 //                            | ( “:” /* Followed by an ns-plain-safe(c) */ )
-function isPlainSafe(c, prev, inblock) {
-  var cIsNsCharOrWhitespace = isNsCharOrWhitespace(c);
-  var cIsNsChar = cIsNsCharOrWhitespace && !isWhitespace(c);
+function isPlainSafe (c, prev, inblock) {
+  const cIsNsCharOrWhitespace = isNsCharOrWhitespace(c)
+  const cIsNsChar = cIsNsCharOrWhitespace && !isWhitespace(c)
   return (
-    // ns-plain-safe
-    inblock ? // c = flow-in
-      cIsNsCharOrWhitespace
-      : cIsNsCharOrWhitespace
-        // - c-flow-indicator
-        && c !== CHAR_COMMA
-        && c !== CHAR_LEFT_SQUARE_BRACKET
-        && c !== CHAR_RIGHT_SQUARE_BRACKET
-        && c !== CHAR_LEFT_CURLY_BRACKET
-        && c !== CHAR_RIGHT_CURLY_BRACKET
-  )
+    (
+      // ns-plain-safe
+      inblock // c = flow-in
+        ? cIsNsCharOrWhitespace
+        : cIsNsCharOrWhitespace &&
+          // - c-flow-indicator
+          c !== CHAR_COMMA &&
+          c !== CHAR_LEFT_SQUARE_BRACKET &&
+          c !== CHAR_RIGHT_SQUARE_BRACKET &&
+          c !== CHAR_LEFT_CURLY_BRACKET &&
+          c !== CHAR_RIGHT_CURLY_BRACKET
+    ) &&
     // ns-plain-char
-    && c !== CHAR_SHARP // false on '#'
-    && !(prev === CHAR_COLON && !cIsNsChar) // false on ': '
-    || (isNsCharOrWhitespace(prev) && !isWhitespace(prev) && c === CHAR_SHARP) // change to true on '[^ ]#'
-    || (prev === CHAR_COLON && cIsNsChar); // change to true on ':[^ ]'
+    c !== CHAR_SHARP && // false on '#'
+    !(prev === CHAR_COLON && !cIsNsChar)
+  ) || // false on ': '
+  (isNsCharOrWhitespace(prev) && !isWhitespace(prev) && c === CHAR_SHARP) || // change to true on '[^ ]#'
+  (prev === CHAR_COLON && cIsNsChar) // change to true on ':[^ ]'
 }
 
 // Simplified test for values allowed as the first character in plain style.
-function isPlainSafeFirst(c) {
+function isPlainSafeFirst (c) {
   // Uses a subset of ns-char - c-indicator
   // where ns-char = nb-char - s-white.
   // No support of ( ( “?” | “:” | “-” ) /* Followed by an ns-plain-safe(c)) */ ) part
-  return isPrintable(c) && c !== CHAR_BOM
-    && !isWhitespace(c) // - s-white
+  return isPrintable(c) &&
+    c !== CHAR_BOM &&
+    !isWhitespace(c) && // - s-white
     // - (c-indicator ::=
     // “-” | “?” | “:” | “,” | “[” | “]” | “{” | “}”
-    && c !== CHAR_MINUS
-    && c !== CHAR_QUESTION
-    && c !== CHAR_COLON
-    && c !== CHAR_COMMA
-    && c !== CHAR_LEFT_SQUARE_BRACKET
-    && c !== CHAR_RIGHT_SQUARE_BRACKET
-    && c !== CHAR_LEFT_CURLY_BRACKET
-    && c !== CHAR_RIGHT_CURLY_BRACKET
+    c !== CHAR_MINUS &&
+    c !== CHAR_QUESTION &&
+    c !== CHAR_COLON &&
+    c !== CHAR_COMMA &&
+    c !== CHAR_LEFT_SQUARE_BRACKET &&
+    c !== CHAR_RIGHT_SQUARE_BRACKET &&
+    c !== CHAR_LEFT_CURLY_BRACKET &&
+    c !== CHAR_RIGHT_CURLY_BRACKET &&
     // | “#” | “&” | “*” | “!” | “|” | “=” | “>” | “'” | “"”
-    && c !== CHAR_SHARP
-    && c !== CHAR_AMPERSAND
-    && c !== CHAR_ASTERISK
-    && c !== CHAR_EXCLAMATION
-    && c !== CHAR_VERTICAL_LINE
-    && c !== CHAR_EQUALS
-    && c !== CHAR_GREATER_THAN
-    && c !== CHAR_SINGLE_QUOTE
-    && c !== CHAR_DOUBLE_QUOTE
+    c !== CHAR_SHARP &&
+    c !== CHAR_AMPERSAND &&
+    c !== CHAR_ASTERISK &&
+    c !== CHAR_EXCLAMATION &&
+    c !== CHAR_VERTICAL_LINE &&
+    c !== CHAR_EQUALS &&
+    c !== CHAR_GREATER_THAN &&
+    c !== CHAR_SINGLE_QUOTE &&
+    c !== CHAR_DOUBLE_QUOTE &&
     // | “%” | “@” | “`”)
-    && c !== CHAR_PERCENT
-    && c !== CHAR_COMMERCIAL_AT
-    && c !== CHAR_GRAVE_ACCENT;
+    c !== CHAR_PERCENT &&
+    c !== CHAR_COMMERCIAL_AT &&
+    c !== CHAR_GRAVE_ACCENT
 }
 
 // Simplified test for values allowed as the last character in plain style.
-function isPlainSafeLast(c) {
+function isPlainSafeLast (c) {
   // just not whitespace or colon, it will be checked to be plain character later
-  return !isWhitespace(c) && c !== CHAR_COLON;
+  return !isWhitespace(c) && c !== CHAR_COLON
 }
 
 // Same as 'string'.codePointAt(pos), but works in older browsers.
-function codePointAt(string, pos) {
-  var first = string.charCodeAt(pos), second;
+function codePointAt (string, pos) {
+  const first = string.charCodeAt(pos)
+  let second
+
   if (first >= 0xD800 && first <= 0xDBFF && pos + 1 < string.length) {
-    second = string.charCodeAt(pos + 1);
+    second = string.charCodeAt(pos + 1)
     if (second >= 0xDC00 && second <= 0xDFFF) {
       // https://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
-      return (first - 0xD800) * 0x400 + second - 0xDC00 + 0x10000;
+      return (first - 0xD800) * 0x400 + second - 0xDC00 + 0x10000
     }
   }
-  return first;
+  return first
 }
 
 // Determines whether block indentation indicator is required.
-function needIndentIndicator(string) {
-  var leadingSpaceRe = /^\n* /;
-  return leadingSpaceRe.test(string);
+function needIndentIndicator (string) {
+  const leadingSpaceRe = /^\n* /
+  return leadingSpaceRe.test(string)
 }
 
-var STYLE_PLAIN   = 1,
-    STYLE_SINGLE  = 2,
-    STYLE_LITERAL = 3,
-    STYLE_FOLDED  = 4,
-    STYLE_DOUBLE  = 5;
+const STYLE_PLAIN = 1
+const STYLE_SINGLE = 2
+const STYLE_LITERAL = 3
+const STYLE_FOLDED = 4
+const STYLE_DOUBLE = 5
 
 // Determines which scalar styles are possible and returns the preferred style.
 // lineWidth = -1 => no limit.
@@ -37961,54 +32436,53 @@ var STYLE_PLAIN   = 1,
 //    STYLE_PLAIN or STYLE_SINGLE => no \n are in the string.
 //    STYLE_LITERAL => no lines are suitable for folding (or lineWidth is -1).
 //    STYLE_FOLDED => a line > lineWidth and can be folded (and lineWidth != -1).
-function chooseScalarStyle(string, singleLineOnly, indentPerLevel, lineWidth,
+function chooseScalarStyle (string, singleLineOnly, indentPerLevel, lineWidth,
   testAmbiguousType, quotingType, forceQuotes, inblock) {
-
-  var i;
-  var char = 0;
-  var prevChar = null;
-  var hasLineBreak = false;
-  var hasFoldableLine = false; // only checked if shouldTrackWidth
-  var shouldTrackWidth = lineWidth !== -1;
-  var previousLineBreak = -1; // count the first line correctly
-  var plain = isPlainSafeFirst(codePointAt(string, 0))
-          && isPlainSafeLast(codePointAt(string, string.length - 1));
+  let i
+  let char = 0
+  let prevChar = null
+  let hasLineBreak = false
+  let hasFoldableLine = false // only checked if shouldTrackWidth
+  const shouldTrackWidth = lineWidth !== -1
+  let previousLineBreak = -1 // count the first line correctly
+  let plain = isPlainSafeFirst(codePointAt(string, 0)) &&
+    isPlainSafeLast(codePointAt(string, string.length - 1))
 
   if (singleLineOnly || forceQuotes) {
     // Case: no block styles.
     // Check for disallowed characters to rule out plain and single.
     for (i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
-      char = codePointAt(string, i);
+      char = codePointAt(string, i)
       if (!isPrintable(char)) {
-        return STYLE_DOUBLE;
+        return STYLE_DOUBLE
       }
-      plain = plain && isPlainSafe(char, prevChar, inblock);
-      prevChar = char;
+      plain = plain && isPlainSafe(char, prevChar, inblock)
+      prevChar = char
     }
   } else {
     // Case: block styles permitted.
     for (i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
-      char = codePointAt(string, i);
+      char = codePointAt(string, i)
       if (char === CHAR_LINE_FEED) {
-        hasLineBreak = true;
+        hasLineBreak = true
         // Check if any line can be folded.
         if (shouldTrackWidth) {
           hasFoldableLine = hasFoldableLine ||
             // Foldable line = too long, and not more-indented.
             (i - previousLineBreak - 1 > lineWidth &&
-             string[previousLineBreak + 1] !== ' ');
-          previousLineBreak = i;
+             string[previousLineBreak + 1] !== ' ')
+          previousLineBreak = i
         }
       } else if (!isPrintable(char)) {
-        return STYLE_DOUBLE;
+        return STYLE_DOUBLE
       }
-      plain = plain && isPlainSafe(char, prevChar, inblock);
-      prevChar = char;
+      plain = plain && isPlainSafe(char, prevChar, inblock)
+      prevChar = char
     }
     // in case the end is missing a \n
     hasFoldableLine = hasFoldableLine || (shouldTrackWidth &&
       (i - previousLineBreak - 1 > lineWidth &&
-       string[previousLineBreak + 1] !== ' '));
+       string[previousLineBreak + 1] !== ' '))
   }
   // Although every style can represent \n without escaping, prefer block styles
   // for multiline, since they're more readable and they don't add empty lines.
@@ -38017,20 +32491,20 @@ function chooseScalarStyle(string, singleLineOnly, indentPerLevel, lineWidth,
     // Strings interpretable as another type have to be quoted;
     // e.g. the string 'true' vs. the boolean true.
     if (plain && !forceQuotes && !testAmbiguousType(string)) {
-      return STYLE_PLAIN;
+      return STYLE_PLAIN
     }
-    return quotingType === QUOTING_TYPE_DOUBLE ? STYLE_DOUBLE : STYLE_SINGLE;
+    return quotingType === QUOTING_TYPE_DOUBLE ? STYLE_DOUBLE : STYLE_SINGLE
   }
   // Edge case: block indentation indicator can only have one digit.
   if (indentPerLevel > 9 && needIndentIndicator(string)) {
-    return STYLE_DOUBLE;
+    return STYLE_DOUBLE
   }
   // At this point we know block styles are valid.
   // Prefer literal style unless we want to fold.
   if (!forceQuotes) {
-    return hasFoldableLine ? STYLE_FOLDED : STYLE_LITERAL;
+    return hasFoldableLine ? STYLE_FOLDED : STYLE_LITERAL
   }
-  return quotingType === QUOTING_TYPE_DOUBLE ? STYLE_DOUBLE : STYLE_SINGLE;
+  return quotingType === QUOTING_TYPE_DOUBLE ? STYLE_DOUBLE : STYLE_SINGLE
 }
 
 // Note: line breaking/folding is implemented for only the folded style.
@@ -38039,18 +32513,18 @@ function chooseScalarStyle(string, singleLineOnly, indentPerLevel, lineWidth,
 //    • No ending newline => unaffected; already using strip "-" chomping.
 //    • Ending newline    => removed then restored.
 //  Importantly, this keeps the "+" chomp indicator from gaining an extra line.
-function writeScalar(state, string, level, iskey, inblock) {
+function writeScalar (state, string, level, iskey, inblock) {
   state.dump = (function () {
     if (string.length === 0) {
-      return state.quotingType === QUOTING_TYPE_DOUBLE ? '""' : "''";
+      return state.quotingType === QUOTING_TYPE_DOUBLE ? '""' : "''"
     }
     if (!state.noCompatMode) {
       if (DEPRECATED_BOOLEANS_SYNTAX.indexOf(string) !== -1 || DEPRECATED_BASE60_SYNTAX.test(string)) {
-        return state.quotingType === QUOTING_TYPE_DOUBLE ? ('"' + string + '"') : ("'" + string + "'");
+        return state.quotingType === QUOTING_TYPE_DOUBLE ? ('"' + string + '"') : ("'" + string + "'")
       }
     }
 
-    var indent = state.indent * Math.max(1, level); // no 0-indent scalars
+    const indent = state.indent * Math.max(1, level) // no 0-indent scalars
     // As indentation gets deeper, let the width decrease monotonically
     // to the lower bound min(state.lineWidth, 40).
     // Note that this implies
@@ -38058,461 +32532,441 @@ function writeScalar(state, string, level, iskey, inblock) {
     //  state.lineWidth > 40 + state.indent: width decreases until the lower bound.
     // This behaves better than a constant minimum width which disallows narrower options,
     // or an indent threshold which causes the width to suddenly increase.
-    var lineWidth = state.lineWidth === -1
-      ? -1 : Math.max(Math.min(state.lineWidth, 40), state.lineWidth - indent);
+    const lineWidth = (state.lineWidth === -1)
+      ? -1
+      : Math.max(Math.min(state.lineWidth, 40), state.lineWidth - indent)
 
     // Without knowing if keys are implicit/explicit, assume implicit for safety.
-    var singleLineOnly = iskey
+    const singleLineOnly = iskey ||
       // No block styles in flow mode.
-      || (state.flowLevel > -1 && level >= state.flowLevel);
-    function testAmbiguity(string) {
-      return testImplicitResolving(state, string);
+      (state.flowLevel > -1 && level >= state.flowLevel)
+    function testAmbiguity (string) {
+      return testImplicitResolving(state, string)
     }
 
     switch (chooseScalarStyle(string, singleLineOnly, state.indent, lineWidth,
       testAmbiguity, state.quotingType, state.forceQuotes && !iskey, inblock)) {
-
       case STYLE_PLAIN:
-        return string;
+        return string
       case STYLE_SINGLE:
-        return "'" + string.replace(/'/g, "''") + "'";
+        return "'" + string.replace(/'/g, "''") + "'"
       case STYLE_LITERAL:
-        return '|' + blockHeader(string, state.indent)
-          + dropEndingNewline(indentString(string, indent));
+        return '|' + blockHeader(string, state.indent) +
+          dropEndingNewline(indentString(string, indent))
       case STYLE_FOLDED:
-        return '>' + blockHeader(string, state.indent)
-          + dropEndingNewline(indentString(foldString(string, lineWidth), indent));
+        return '>' + blockHeader(string, state.indent) +
+          dropEndingNewline(indentString(foldString(string, lineWidth), indent))
       case STYLE_DOUBLE:
-        return '"' + escapeString(string, lineWidth) + '"';
+        return '"' + escapeString(string, lineWidth) + '"'
       default:
-        throw new YAMLException('impossible error: invalid scalar style');
+        throw new YAMLException('impossible error: invalid scalar style')
     }
-  }());
+  }())
 }
 
 // Pre-conditions: string is valid for a block scalar, 1 <= indentPerLevel <= 9.
-function blockHeader(string, indentPerLevel) {
-  var indentIndicator = needIndentIndicator(string) ? String(indentPerLevel) : '';
+function blockHeader (string, indentPerLevel) {
+  const indentIndicator = needIndentIndicator(string) ? String(indentPerLevel) : ''
 
   // note the special case: the string '\n' counts as a "trailing" empty line.
-  var clip =          string[string.length - 1] === '\n';
-  var keep = clip && (string[string.length - 2] === '\n' || string === '\n');
-  var chomp = keep ? '+' : (clip ? '' : '-');
+  const clip = string[string.length - 1] === '\n'
+  const keep = clip && (string[string.length - 2] === '\n' || string === '\n')
+  const chomp = keep ? '+' : (clip ? '' : '-')
 
-  return indentIndicator + chomp + '\n';
+  return indentIndicator + chomp + '\n'
 }
 
 // (See the note for writeScalar.)
-function dropEndingNewline(string) {
-  return string[string.length - 1] === '\n' ? string.slice(0, -1) : string;
+function dropEndingNewline (string) {
+  return string[string.length - 1] === '\n' ? string.slice(0, -1) : string
 }
 
 // Note: a long line without a suitable break point will exceed the width limit.
 // Pre-conditions: every char in str isPrintable, str.length > 0, width > 0.
-function foldString(string, width) {
+function foldString (string, width) {
   // In folded style, $k$ consecutive newlines output as $k+1$ newlines—
   // unless they're before or after a more-indented line, or at the very
   // beginning or end, in which case $k$ maps to $k$.
   // Therefore, parse each chunk as newline(s) followed by a content line.
-  var lineRe = /(\n+)([^\n]*)/g;
+  const lineRe = /(\n+)([^\n]*)/g
 
   // first line (possibly an empty line)
-  var result = (function () {
-    var nextLF = string.indexOf('\n');
-    nextLF = nextLF !== -1 ? nextLF : string.length;
-    lineRe.lastIndex = nextLF;
-    return foldLine(string.slice(0, nextLF), width);
-  }());
+  let result = (function () {
+    let nextLF = string.indexOf('\n')
+    nextLF = nextLF !== -1 ? nextLF : string.length
+    lineRe.lastIndex = nextLF
+    return foldLine(string.slice(0, nextLF), width)
+  }())
   // If we haven't reached the first content line yet, don't add an extra \n.
-  var prevMoreIndented = string[0] === '\n' || string[0] === ' ';
-  var moreIndented;
+  let prevMoreIndented = string[0] === '\n' || string[0] === ' '
+  let moreIndented
 
   // rest of the lines
-  var match;
+  let match
   while ((match = lineRe.exec(string))) {
-    var prefix = match[1], line = match[2];
-    moreIndented = (line[0] === ' ');
-    result += prefix
-      + (!prevMoreIndented && !moreIndented && line !== ''
-        ? '\n' : '')
-      + foldLine(line, width);
-    prevMoreIndented = moreIndented;
+    const prefix = match[1]
+    const line = match[2]
+
+    moreIndented = (line[0] === ' ')
+    result += prefix +
+      ((!prevMoreIndented && !moreIndented && line !== '') ? '\n' : '') +
+      foldLine(line, width)
+    prevMoreIndented = moreIndented
   }
 
-  return result;
+  return result
 }
 
 // Greedy line breaking.
 // Picks the longest line under the limit each time,
 // otherwise settles for the shortest line over the limit.
 // NB. More-indented lines *cannot* be folded, as that would add an extra \n.
-function foldLine(line, width) {
-  if (line === '' || line[0] === ' ') return line;
+function foldLine (line, width) {
+  if (line === '' || line[0] === ' ') return line
 
   // Since a more-indented line adds a \n, breaks can't be followed by a space.
-  var breakRe = / [^ ]/g; // note: the match index will always be <= length-2.
-  var match;
+  const breakRe = / [^ ]/g // note: the match index will always be <= length-2.
+  let match
   // start is an inclusive index. end, curr, and next are exclusive.
-  var start = 0, end, curr = 0, next = 0;
-  var result = '';
+  let start = 0
+  let end
+  let curr = 0
+  let next = 0
+  let result = ''
 
   // Invariants: 0 <= start <= length-1.
   //   0 <= curr <= next <= max(0, length-2). curr - start <= width.
   // Inside the loop:
   //   A match implies length >= 2, so curr and next are <= length-2.
   while ((match = breakRe.exec(line))) {
-    next = match.index;
+    next = match.index
     // maintain invariant: curr - start <= width
     if (next - start > width) {
-      end = (curr > start) ? curr : next; // derive end <= length-2
-      result += '\n' + line.slice(start, end);
+      end = (curr > start) ? curr : next // derive end <= length-2
+      result += '\n' + line.slice(start, end)
       // skip the space that was output as \n
-      start = end + 1;                    // derive start <= length-1
+      start = end + 1                    // derive start <= length-1
     }
-    curr = next;
+    curr = next
   }
 
   // By the invariants, start <= length-1, so there is something left over.
   // It is either the whole string or a part starting from non-whitespace.
-  result += '\n';
+  result += '\n'
   // Insert a break if the remainder is too long and there is a break available.
   if (line.length - start > width && curr > start) {
-    result += line.slice(start, curr) + '\n' + line.slice(curr + 1);
+    result += line.slice(start, curr) + '\n' + line.slice(curr + 1)
   } else {
-    result += line.slice(start);
+    result += line.slice(start)
   }
 
-  return result.slice(1); // drop extra \n joiner
+  return result.slice(1) // drop extra \n joiner
 }
 
 // Escapes a double-quoted string.
-function escapeString(string) {
-  var result = '';
-  var char = 0;
-  var escapeSeq;
+function escapeString (string) {
+  let result = ''
+  let char = 0
 
-  for (var i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
-    char = codePointAt(string, i);
-    escapeSeq = ESCAPE_SEQUENCES[char];
+  for (let i = 0; i < string.length; char >= 0x10000 ? i += 2 : i++) {
+    char = codePointAt(string, i)
+    const escapeSeq = ESCAPE_SEQUENCES[char]
 
     if (!escapeSeq && isPrintable(char)) {
-      result += string[i];
-      if (char >= 0x10000) result += string[i + 1];
+      result += string[i]
+      if (char >= 0x10000) result += string[i + 1]
     } else {
-      result += escapeSeq || encodeHex(char);
+      result += escapeSeq || encodeHex(char)
     }
   }
 
-  return result;
+  return result
 }
 
-function writeFlowSequence(state, level, object) {
-  var _result = '',
-      _tag    = state.tag,
-      index,
-      length,
-      value;
+function writeFlowSequence (state, level, object) {
+  let _result = ''
+  const _tag = state.tag
 
-  for (index = 0, length = object.length; index < length; index += 1) {
-    value = object[index];
+  for (let index = 0, length = object.length; index < length; index += 1) {
+    let value = object[index]
 
     if (state.replacer) {
-      value = state.replacer.call(object, String(index), value);
+      value = state.replacer.call(object, String(index), value)
     }
 
     // Write only valid elements, put null instead of invalid elements.
     if (writeNode(state, level, value, false, false) ||
         (typeof value === 'undefined' &&
          writeNode(state, level, null, false, false))) {
-
-      if (_result !== '') _result += ',' + (!state.condenseFlow ? ' ' : '');
-      _result += state.dump;
+      if (_result !== '') _result += ',' + (!state.condenseFlow ? ' ' : '')
+      _result += state.dump
     }
   }
 
-  state.tag = _tag;
-  state.dump = '[' + _result + ']';
+  state.tag = _tag
+  state.dump = '[' + _result + ']'
 }
 
-function writeBlockSequence(state, level, object, compact) {
-  var _result = '',
-      _tag    = state.tag,
-      index,
-      length,
-      value;
+function writeBlockSequence (state, level, object, compact) {
+  let _result = ''
+  const _tag = state.tag
 
-  for (index = 0, length = object.length; index < length; index += 1) {
-    value = object[index];
+  for (let index = 0, length = object.length; index < length; index += 1) {
+    let value = object[index]
 
     if (state.replacer) {
-      value = state.replacer.call(object, String(index), value);
+      value = state.replacer.call(object, String(index), value)
     }
 
     // Write only valid elements, put null instead of invalid elements.
     if (writeNode(state, level + 1, value, true, true, false, true) ||
         (typeof value === 'undefined' &&
          writeNode(state, level + 1, null, true, true, false, true))) {
-
       if (!compact || _result !== '') {
-        _result += generateNextLine(state, level);
+        _result += generateNextLine(state, level)
       }
 
       if (state.dump && CHAR_LINE_FEED === state.dump.charCodeAt(0)) {
-        _result += '-';
+        _result += '-'
       } else {
-        _result += '- ';
+        _result += '- '
       }
 
-      _result += state.dump;
+      _result += state.dump
     }
   }
 
-  state.tag = _tag;
-  state.dump = _result || '[]'; // Empty sequence if no valid values.
+  state.tag = _tag
+  state.dump = _result || '[]' // Empty sequence if no valid values.
 }
 
-function writeFlowMapping(state, level, object) {
-  var _result       = '',
-      _tag          = state.tag,
-      objectKeyList = Object.keys(object),
-      index,
-      length,
-      objectKey,
-      objectValue,
-      pairBuffer;
+function writeFlowMapping (state, level, object) {
+  let _result = ''
+  const _tag = state.tag
+  const objectKeyList = Object.keys(object)
 
-  for (index = 0, length = objectKeyList.length; index < length; index += 1) {
+  for (let index = 0, length = objectKeyList.length; index < length; index += 1) {
+    let pairBuffer = ''
+    if (_result !== '') pairBuffer += ', '
 
-    pairBuffer = '';
-    if (_result !== '') pairBuffer += ', ';
+    if (state.condenseFlow) pairBuffer += '"'
 
-    if (state.condenseFlow) pairBuffer += '"';
-
-    objectKey = objectKeyList[index];
-    objectValue = object[objectKey];
+    const objectKey = objectKeyList[index]
+    let objectValue = object[objectKey]
 
     if (state.replacer) {
-      objectValue = state.replacer.call(object, objectKey, objectValue);
+      objectValue = state.replacer.call(object, objectKey, objectValue)
     }
 
     if (!writeNode(state, level, objectKey, false, false)) {
-      continue; // Skip this pair because of invalid key;
+      continue // Skip this pair because of invalid key;
     }
 
-    if (state.dump.length > 1024) pairBuffer += '? ';
+    if (state.dump.length > 1024) pairBuffer += '? '
 
-    pairBuffer += state.dump + (state.condenseFlow ? '"' : '') + ':' + (state.condenseFlow ? '' : ' ');
+    pairBuffer += state.dump + (state.condenseFlow ? '"' : '') + ':' + (state.condenseFlow ? '' : ' ')
 
     if (!writeNode(state, level, objectValue, false, false)) {
-      continue; // Skip this pair because of invalid value.
+      continue // Skip this pair because of invalid value.
     }
 
-    pairBuffer += state.dump;
+    pairBuffer += state.dump
 
     // Both key and value are valid.
-    _result += pairBuffer;
+    _result += pairBuffer
   }
 
-  state.tag = _tag;
-  state.dump = '{' + _result + '}';
+  state.tag = _tag
+  state.dump = '{' + _result + '}'
 }
 
-function writeBlockMapping(state, level, object, compact) {
-  var _result       = '',
-      _tag          = state.tag,
-      objectKeyList = Object.keys(object),
-      index,
-      length,
-      objectKey,
-      objectValue,
-      explicitPair,
-      pairBuffer;
+function writeBlockMapping (state, level, object, compact) {
+  let _result = ''
+  const _tag = state.tag
+  const objectKeyList = Object.keys(object)
 
   // Allow sorting keys so that the output file is deterministic
   if (state.sortKeys === true) {
     // Default sorting
-    objectKeyList.sort();
+    objectKeyList.sort()
   } else if (typeof state.sortKeys === 'function') {
     // Custom sort function
-    objectKeyList.sort(state.sortKeys);
+    objectKeyList.sort(state.sortKeys)
   } else if (state.sortKeys) {
     // Something is wrong
-    throw new YAMLException('sortKeys must be a boolean or a function');
+    throw new YAMLException('sortKeys must be a boolean or a function')
   }
 
-  for (index = 0, length = objectKeyList.length; index < length; index += 1) {
-    pairBuffer = '';
+  for (let index = 0, length = objectKeyList.length; index < length; index += 1) {
+    let pairBuffer = ''
 
     if (!compact || _result !== '') {
-      pairBuffer += generateNextLine(state, level);
+      pairBuffer += generateNextLine(state, level)
     }
 
-    objectKey = objectKeyList[index];
-    objectValue = object[objectKey];
+    const objectKey = objectKeyList[index]
+    let objectValue = object[objectKey]
 
     if (state.replacer) {
-      objectValue = state.replacer.call(object, objectKey, objectValue);
+      objectValue = state.replacer.call(object, objectKey, objectValue)
     }
 
     if (!writeNode(state, level + 1, objectKey, true, true, true)) {
-      continue; // Skip this pair because of invalid key.
+      continue // Skip this pair because of invalid key.
     }
 
-    explicitPair = (state.tag !== null && state.tag !== '?') ||
-                   (state.dump && state.dump.length > 1024);
+    const explicitPair = (state.tag !== null && state.tag !== '?') ||
+                   (state.dump && state.dump.length > 1024)
 
     if (explicitPair) {
       if (state.dump && CHAR_LINE_FEED === state.dump.charCodeAt(0)) {
-        pairBuffer += '?';
+        pairBuffer += '?'
       } else {
-        pairBuffer += '? ';
+        pairBuffer += '? '
       }
     }
 
-    pairBuffer += state.dump;
+    pairBuffer += state.dump
 
     if (explicitPair) {
-      pairBuffer += generateNextLine(state, level);
+      pairBuffer += generateNextLine(state, level)
     }
 
     if (!writeNode(state, level + 1, objectValue, true, explicitPair)) {
-      continue; // Skip this pair because of invalid value.
+      continue // Skip this pair because of invalid value.
     }
 
     if (state.dump && CHAR_LINE_FEED === state.dump.charCodeAt(0)) {
-      pairBuffer += ':';
+      pairBuffer += ':'
     } else {
-      pairBuffer += ': ';
+      pairBuffer += ': '
     }
 
-    pairBuffer += state.dump;
+    pairBuffer += state.dump
 
     // Both key and value are valid.
-    _result += pairBuffer;
+    _result += pairBuffer
   }
 
-  state.tag = _tag;
-  state.dump = _result || '{}'; // Empty mapping if no valid pairs.
+  state.tag = _tag
+  state.dump = _result || '{}' // Empty mapping if no valid pairs.
 }
 
-function detectType(state, object, explicit) {
-  var _result, typeList, index, length, type, style;
+function detectType (state, object, explicit) {
+  const typeList = explicit ? state.explicitTypes : state.implicitTypes
 
-  typeList = explicit ? state.explicitTypes : state.implicitTypes;
+  for (let index = 0, length = typeList.length; index < length; index += 1) {
+    const type = typeList[index]
 
-  for (index = 0, length = typeList.length; index < length; index += 1) {
-    type = typeList[index];
-
-    if ((type.instanceOf  || type.predicate) &&
+    if ((type.instanceOf || type.predicate) &&
         (!type.instanceOf || ((typeof object === 'object') && (object instanceof type.instanceOf))) &&
-        (!type.predicate  || type.predicate(object))) {
-
+        (!type.predicate || type.predicate(object))) {
       if (explicit) {
         if (type.multi && type.representName) {
-          state.tag = type.representName(object);
+          state.tag = type.representName(object)
         } else {
-          state.tag = type.tag;
+          state.tag = type.tag
         }
       } else {
-        state.tag = '?';
+        state.tag = '?'
       }
 
       if (type.represent) {
-        style = state.styleMap[type.tag] || type.defaultStyle;
+        const style = state.styleMap[type.tag] || type.defaultStyle
 
+        let _result
         if (_toString.call(type.represent) === '[object Function]') {
-          _result = type.represent(object, style);
+          _result = type.represent(object, style)
         } else if (_hasOwnProperty.call(type.represent, style)) {
-          _result = type.represent[style](object, style);
+          _result = type.represent[style](object, style)
         } else {
-          throw new YAMLException('!<' + type.tag + '> tag resolver accepts not "' + style + '" style');
+          throw new YAMLException('!<' + type.tag + '> tag resolver accepts not "' + style + '" style')
         }
 
-        state.dump = _result;
+        state.dump = _result
       }
 
-      return true;
+      return true
     }
   }
 
-  return false;
+  return false
 }
 
 // Serializes `object` and writes it to global `result`.
 // Returns true on success, or false on invalid object.
 //
-function writeNode(state, level, object, block, compact, iskey, isblockseq) {
-  state.tag = null;
-  state.dump = object;
+function writeNode (state, level, object, block, compact, iskey, isblockseq) {
+  state.tag = null
+  state.dump = object
 
   if (!detectType(state, object, false)) {
-    detectType(state, object, true);
+    detectType(state, object, true)
   }
 
-  var type = _toString.call(state.dump);
-  var inblock = block;
-  var tagStr;
+  const type = _toString.call(state.dump)
+  const inblock = block
 
   if (block) {
-    block = (state.flowLevel < 0 || state.flowLevel > level);
+    block = (state.flowLevel < 0 || state.flowLevel > level)
   }
 
-  var objectOrArray = type === '[object Object]' || type === '[object Array]',
-      duplicateIndex,
-      duplicate;
+  const objectOrArray = type === '[object Object]' || type === '[object Array]'
+  let duplicateIndex
+  let duplicate
 
   if (objectOrArray) {
-    duplicateIndex = state.duplicates.indexOf(object);
-    duplicate = duplicateIndex !== -1;
+    duplicateIndex = state.duplicates.indexOf(object)
+    duplicate = duplicateIndex !== -1
   }
 
   if ((state.tag !== null && state.tag !== '?') || duplicate || (state.indent !== 2 && level > 0)) {
-    compact = false;
+    compact = false
   }
 
   if (duplicate && state.usedDuplicates[duplicateIndex]) {
-    state.dump = '*ref_' + duplicateIndex;
+    state.dump = '*ref_' + duplicateIndex
   } else {
     if (objectOrArray && duplicate && !state.usedDuplicates[duplicateIndex]) {
-      state.usedDuplicates[duplicateIndex] = true;
+      state.usedDuplicates[duplicateIndex] = true
     }
     if (type === '[object Object]') {
       if (block && (Object.keys(state.dump).length !== 0)) {
-        writeBlockMapping(state, level, state.dump, compact);
+        writeBlockMapping(state, level, state.dump, compact)
         if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + state.dump;
+          state.dump = '&ref_' + duplicateIndex + state.dump
         }
       } else {
-        writeFlowMapping(state, level, state.dump);
+        writeFlowMapping(state, level, state.dump)
         if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + ' ' + state.dump;
+          state.dump = '&ref_' + duplicateIndex + ' ' + state.dump
         }
       }
     } else if (type === '[object Array]') {
       if (block && (state.dump.length !== 0)) {
         if (state.noArrayIndent && !isblockseq && level > 0) {
-          writeBlockSequence(state, level - 1, state.dump, compact);
+          writeBlockSequence(state, level - 1, state.dump, compact)
         } else {
-          writeBlockSequence(state, level, state.dump, compact);
+          writeBlockSequence(state, level, state.dump, compact)
         }
         if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + state.dump;
+          state.dump = '&ref_' + duplicateIndex + state.dump
         }
       } else {
-        writeFlowSequence(state, level, state.dump);
+        writeFlowSequence(state, level, state.dump)
         if (duplicate) {
-          state.dump = '&ref_' + duplicateIndex + ' ' + state.dump;
+          state.dump = '&ref_' + duplicateIndex + ' ' + state.dump
         }
       }
     } else if (type === '[object String]') {
       if (state.tag !== '?') {
-        writeScalar(state, state.dump, level, iskey, inblock);
+        writeScalar(state, state.dump, level, iskey, inblock)
       }
     } else if (type === '[object Undefined]') {
-      return false;
+      return false
     } else {
-      if (state.skipInvalid) return false;
-      throw new YAMLException('unacceptable kind of an object to dump ' + type);
+      if (state.skipInvalid) return false
+      throw new YAMLException('unacceptable kind of an object to dump ' + type)
     }
 
     if (state.tag !== null && state.tag !== '?') {
@@ -38529,87 +32983,82 @@ function writeNode(state, level, object, block, compact, iskey, isblockseq) {
       //
       // Also need to encode '!' because it has special meaning (end of tag prefix).
       //
-      tagStr = encodeURI(
+      let tagStr = encodeURI(
         state.tag[0] === '!' ? state.tag.slice(1) : state.tag
-      ).replace(/!/g, '%21');
+      ).replace(/!/g, '%21')
 
       if (state.tag[0] === '!') {
-        tagStr = '!' + tagStr;
+        tagStr = '!' + tagStr
       } else if (tagStr.slice(0, 18) === 'tag:yaml.org,2002:') {
-        tagStr = '!!' + tagStr.slice(18);
+        tagStr = '!!' + tagStr.slice(18)
       } else {
-        tagStr = '!<' + tagStr + '>';
+        tagStr = '!<' + tagStr + '>'
       }
 
-      state.dump = tagStr + ' ' + state.dump;
+      state.dump = tagStr + ' ' + state.dump
     }
   }
 
-  return true;
+  return true
 }
 
-function getDuplicateReferences(object, state) {
-  var objects = [],
-      duplicatesIndexes = [],
-      index,
-      length;
+function getDuplicateReferences (object, state) {
+  const objects = []
+  const duplicatesIndexes = []
 
-  inspectNode(object, objects, duplicatesIndexes);
+  inspectNode(object, objects, duplicatesIndexes)
 
-  for (index = 0, length = duplicatesIndexes.length; index < length; index += 1) {
-    state.duplicates.push(objects[duplicatesIndexes[index]]);
+  const length = duplicatesIndexes.length
+  for (let index = 0; index < length; index += 1) {
+    state.duplicates.push(objects[duplicatesIndexes[index]])
   }
-  state.usedDuplicates = new Array(length);
+  state.usedDuplicates = new Array(length)
 }
 
-function inspectNode(object, objects, duplicatesIndexes) {
-  var objectKeyList,
-      index,
-      length;
-
+function inspectNode (object, objects, duplicatesIndexes) {
   if (object !== null && typeof object === 'object') {
-    index = objects.indexOf(object);
+    const index = objects.indexOf(object)
     if (index !== -1) {
       if (duplicatesIndexes.indexOf(index) === -1) {
-        duplicatesIndexes.push(index);
+        duplicatesIndexes.push(index)
       }
     } else {
-      objects.push(object);
+      objects.push(object)
 
       if (Array.isArray(object)) {
-        for (index = 0, length = object.length; index < length; index += 1) {
-          inspectNode(object[index], objects, duplicatesIndexes);
+        for (let i = 0, length = object.length; i < length; i += 1) {
+          inspectNode(object[i], objects, duplicatesIndexes)
         }
       } else {
-        objectKeyList = Object.keys(object);
+        const objectKeyList = Object.keys(object)
 
-        for (index = 0, length = objectKeyList.length; index < length; index += 1) {
-          inspectNode(object[objectKeyList[index]], objects, duplicatesIndexes);
+        for (let i = 0, length = objectKeyList.length; i < length; i += 1) {
+          inspectNode(object[objectKeyList[i]], objects, duplicatesIndexes)
         }
       }
     }
   }
 }
 
-function dump(input, options) {
-  options = options || {};
+function dump (input, options) {
+  options = options || {}
 
-  var state = new State(options);
+  const state = new State(options)
 
-  if (!state.noRefs) getDuplicateReferences(input, state);
+  if (!state.noRefs) getDuplicateReferences(input, state)
 
-  var value = input;
+  let value = input
 
   if (state.replacer) {
-    value = state.replacer.call({ '': value }, '', value);
+    value = state.replacer.call({ '': value }, '', value)
   }
 
-  if (writeNode(state, 0, value, true, true)) return state.dump + '\n';
+  if (writeNode(state, 0, value, true, true)) return state.dump + '\n'
 
-  return '';
+  return ''
 }
 
-module.exports.dump = dump;
+module.exports.dump = dump
 
 
 /***/ }),
@@ -38622,57 +33071,53 @@ module.exports.dump = dump;
 //
 
 
+function formatError (exception, compact) {
+  let where = ''
+  const message = exception.reason || '(unknown reason)'
 
-function formatError(exception, compact) {
-  var where = '', message = exception.reason || '(unknown reason)';
-
-  if (!exception.mark) return message;
+  if (!exception.mark) return message
 
   if (exception.mark.name) {
-    where += 'in "' + exception.mark.name + '" ';
+    where += 'in "' + exception.mark.name + '" '
   }
 
-  where += '(' + (exception.mark.line + 1) + ':' + (exception.mark.column + 1) + ')';
+  where += '(' + (exception.mark.line + 1) + ':' + (exception.mark.column + 1) + ')'
 
   if (!compact && exception.mark.snippet) {
-    where += '\n\n' + exception.mark.snippet;
+    where += '\n\n' + exception.mark.snippet
   }
 
-  return message + ' ' + where;
+  return message + ' ' + where
 }
 
-
-function YAMLException(reason, mark) {
+function YAMLException (reason, mark) {
   // Super constructor
-  Error.call(this);
+  Error.call(this)
 
-  this.name = 'YAMLException';
-  this.reason = reason;
-  this.mark = mark;
-  this.message = formatError(this, false);
+  this.name = 'YAMLException'
+  this.reason = reason
+  this.mark = mark
+  this.message = formatError(this, false)
 
   // Include stack trace in error object
   if (Error.captureStackTrace) {
     // Chrome and NodeJS
-    Error.captureStackTrace(this, this.constructor);
+    Error.captureStackTrace(this, this.constructor)
   } else {
     // FF, IE 10+ and Safari 6+. Fallback for others
-    this.stack = (new Error()).stack || '';
+    this.stack = (new Error()).stack || ''
   }
 }
 
-
 // Inherit from Error
-YAMLException.prototype = Object.create(Error.prototype);
-YAMLException.prototype.constructor = YAMLException;
+YAMLException.prototype = Object.create(Error.prototype)
+YAMLException.prototype.constructor = YAMLException
 
+YAMLException.prototype.toString = function toString (compact) {
+  return this.name + ': ' + formatError(this, compact)
+}
 
-YAMLException.prototype.toString = function toString(compact) {
-  return this.name + ': ' + formatError(this, compact);
-};
-
-
-module.exports = YAMLException;
+module.exports = YAMLException
 
 
 /***/ }),
@@ -38683,161 +33128,177 @@ module.exports = YAMLException;
 "use strict";
 
 
-/*eslint-disable max-len,no-use-before-define*/
+const common = __nccwpck_require__(26829)
+const YAMLException = __nccwpck_require__(68179)
+const makeSnippet = __nccwpck_require__(96975)
+const DEFAULT_SCHEMA = __nccwpck_require__(18759)
 
-var common              = __nccwpck_require__(26829);
-var YAMLException       = __nccwpck_require__(68179);
-var makeSnippet         = __nccwpck_require__(96975);
-var DEFAULT_SCHEMA      = __nccwpck_require__(18759);
+const _hasOwnProperty = Object.prototype.hasOwnProperty
 
+const CONTEXT_FLOW_IN = 1
+const CONTEXT_FLOW_OUT = 2
+const CONTEXT_BLOCK_IN = 3
+const CONTEXT_BLOCK_OUT = 4
 
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
+const CHOMPING_CLIP = 1
+const CHOMPING_STRIP = 2
+const CHOMPING_KEEP = 3
 
+// eslint-disable-next-line no-control-regex
+const PATTERN_NON_PRINTABLE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/
+const PATTERN_NON_ASCII_LINE_BREAKS = /[\x85\u2028\u2029]/
+// eslint-disable-next-line no-useless-escape
+const PATTERN_FLOW_INDICATORS = /[,\[\]{}]/
+// eslint-disable-next-line no-useless-escape
+const PATTERN_TAG_HANDLE = /^(?:!|!!|![0-9A-Za-z-]+!)$/
+// eslint-disable-next-line no-useless-escape
+const PATTERN_TAG_URI = /^(?:!|[^,\[\]{}])(?:%[0-9a-f]{2}|[0-9a-z\-#;/?:@&=+$,_.!~*'()\[\]])*$/i
 
-var CONTEXT_FLOW_IN   = 1;
-var CONTEXT_FLOW_OUT  = 2;
-var CONTEXT_BLOCK_IN  = 3;
-var CONTEXT_BLOCK_OUT = 4;
+function _class (obj) { return Object.prototype.toString.call(obj) }
 
-
-var CHOMPING_CLIP  = 1;
-var CHOMPING_STRIP = 2;
-var CHOMPING_KEEP  = 3;
-
-
-var PATTERN_NON_PRINTABLE         = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
-var PATTERN_NON_ASCII_LINE_BREAKS = /[\x85\u2028\u2029]/;
-var PATTERN_FLOW_INDICATORS       = /[,\[\]\{\}]/;
-var PATTERN_TAG_HANDLE            = /^(?:!|!!|![a-z\-]+!)$/i;
-var PATTERN_TAG_URI               = /^(?:!|[^,\[\]\{\}])(?:%[0-9a-f]{2}|[0-9a-z\-#;\/\?:@&=\+\$,_\.!~\*'\(\)\[\]])*$/i;
-
-
-function _class(obj) { return Object.prototype.toString.call(obj); }
-
-function is_EOL(c) {
-  return (c === 0x0A/* LF */) || (c === 0x0D/* CR */);
+function isEol (c) {
+  return (c === 0x0A/* LF */) || (c === 0x0D/* CR */)
 }
 
-function is_WHITE_SPACE(c) {
-  return (c === 0x09/* Tab */) || (c === 0x20/* Space */);
+function isWhiteSpace (c) {
+  return (c === 0x09/* Tab */) || (c === 0x20/* Space */)
 }
 
-function is_WS_OR_EOL(c) {
+function isWsOrEol (c) {
   return (c === 0x09/* Tab */) ||
          (c === 0x20/* Space */) ||
          (c === 0x0A/* LF */) ||
-         (c === 0x0D/* CR */);
+         (c === 0x0D/* CR */)
 }
 
-function is_FLOW_INDICATOR(c) {
+function isFlowIndicator (c) {
   return c === 0x2C/* , */ ||
          c === 0x5B/* [ */ ||
          c === 0x5D/* ] */ ||
          c === 0x7B/* { */ ||
-         c === 0x7D/* } */;
+         c === 0x7D/* } */
 }
 
-function fromHexCode(c) {
-  var lc;
-
-  if ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */)) {
-    return c - 0x30;
+function fromHexCode (c) {
+  if ((c >= 0x30/* 0 */) && (c <= 0x39/* 9 */)) {
+    return c - 0x30
   }
 
-  /*eslint-disable no-bitwise*/
-  lc = c | 0x20;
+  const lc = c | 0x20
 
-  if ((0x61/* a */ <= lc) && (lc <= 0x66/* f */)) {
-    return lc - 0x61 + 10;
+  if ((lc >= 0x61/* a */) && (lc <= 0x66/* f */)) {
+    return lc - 0x61 + 10
   }
 
-  return -1;
+  return -1
 }
 
-function escapedHexLen(c) {
-  if (c === 0x78/* x */) { return 2; }
-  if (c === 0x75/* u */) { return 4; }
-  if (c === 0x55/* U */) { return 8; }
-  return 0;
+function escapedHexLen (c) {
+  if (c === 0x78/* x */) { return 2 }
+  if (c === 0x75/* u */) { return 4 }
+  if (c === 0x55/* U */) { return 8 }
+  return 0
 }
 
-function fromDecimalCode(c) {
-  if ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */)) {
-    return c - 0x30;
+function fromDecimalCode (c) {
+  if ((c >= 0x30/* 0 */) && (c <= 0x39/* 9 */)) {
+    return c - 0x30
   }
 
-  return -1;
+  return -1
 }
 
-function simpleEscapeSequence(c) {
-  /* eslint-disable indent */
-  return (c === 0x30/* 0 */) ? '\x00' :
-        (c === 0x61/* a */) ? '\x07' :
-        (c === 0x62/* b */) ? '\x08' :
-        (c === 0x74/* t */) ? '\x09' :
-        (c === 0x09/* Tab */) ? '\x09' :
-        (c === 0x6E/* n */) ? '\x0A' :
-        (c === 0x76/* v */) ? '\x0B' :
-        (c === 0x66/* f */) ? '\x0C' :
-        (c === 0x72/* r */) ? '\x0D' :
-        (c === 0x65/* e */) ? '\x1B' :
-        (c === 0x20/* Space */) ? ' ' :
-        (c === 0x22/* " */) ? '\x22' :
-        (c === 0x2F/* / */) ? '/' :
-        (c === 0x5C/* \ */) ? '\x5C' :
-        (c === 0x4E/* N */) ? '\x85' :
-        (c === 0x5F/* _ */) ? '\xA0' :
-        (c === 0x4C/* L */) ? '\u2028' :
-        (c === 0x50/* P */) ? '\u2029' : '';
+function simpleEscapeSequence (c) {
+  switch (c) {
+    case 0x30/* 0 */: return '\x00'
+    case 0x61/* a */: return '\x07'
+    case 0x62/* b */: return '\x08'
+    case 0x74/* t */: return '\x09'
+    case 0x09/* Tab */: return '\x09'
+    case 0x6E/* n */: return '\x0A'
+    case 0x76/* v */: return '\x0B'
+    case 0x66/* f */: return '\x0C'
+    case 0x72/* r */: return '\x0D'
+    case 0x65/* e */: return '\x1B'
+    case 0x20/* Space */: return ' '
+    case 0x22/* " */: return '\x22'
+    case 0x2F/* / */: return '/'
+    case 0x5C/* \ */: return '\x5C'
+    case 0x4E/* N */: return '\x85'
+    case 0x5F/* _ */: return '\xA0'
+    case 0x4C/* L */: return '\u2028'
+    case 0x50/* P */: return '\u2029'
+    default: return ''
+  }
 }
 
-function charFromCodepoint(c) {
+function charFromCodepoint (c) {
   if (c <= 0xFFFF) {
-    return String.fromCharCode(c);
+    return String.fromCharCode(c)
   }
   // Encode UTF-16 surrogate pair
   // https://en.wikipedia.org/wiki/UTF-16#Code_points_U.2B010000_to_U.2B10FFFF
   return String.fromCharCode(
     ((c - 0x010000) >> 10) + 0xD800,
     ((c - 0x010000) & 0x03FF) + 0xDC00
-  );
+  )
 }
 
-var simpleEscapeCheck = new Array(256); // integer, for fast access
-var simpleEscapeMap = new Array(256);
-for (var i = 0; i < 256; i++) {
-  simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0;
-  simpleEscapeMap[i] = simpleEscapeSequence(i);
+// set a property of a literal object, while protecting against prototype pollution,
+// see https://github.com/nodeca/js-yaml/issues/164 for more details
+function setProperty (object, key, value) {
+  // used for this specific key only because Object.defineProperty is slow
+  if (key === '__proto__') {
+    Object.defineProperty(object, key, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: value
+    })
+  } else {
+    object[key] = value
+  }
 }
 
+const simpleEscapeCheck = new Array(256) // integer, for fast access
+const simpleEscapeMap = new Array(256)
+for (let i = 0; i < 256; i++) {
+  simpleEscapeCheck[i] = simpleEscapeSequence(i) ? 1 : 0
+  simpleEscapeMap[i] = simpleEscapeSequence(i)
+}
 
-function State(input, options) {
-  this.input = input;
+function State (input, options) {
+  this.input = input
 
-  this.filename  = options['filename']  || null;
-  this.schema    = options['schema']    || DEFAULT_SCHEMA;
-  this.onWarning = options['onWarning'] || null;
+  this.filename = options['filename'] || null
+  this.schema = options['schema'] || DEFAULT_SCHEMA
+  this.onWarning = options['onWarning'] || null
   // (Hidden) Remove? makes the loader to expect YAML 1.1 documents
   // if such documents have no explicit %YAML directive
-  this.legacy    = options['legacy']    || false;
+  this.legacy = options['legacy'] || false
 
-  this.json      = options['json']      || false;
-  this.listener  = options['listener']  || null;
+  this.json = options['json'] || false
+  this.listener = options['listener'] || null
+  this.maxDepth = typeof options['maxDepth'] === 'number' ? options['maxDepth'] : 100
+  this.maxTotalMergeKeys = typeof options['maxTotalMergeKeys'] === 'number' ? options['maxTotalMergeKeys'] : 10000
 
-  this.implicitTypes = this.schema.compiledImplicit;
-  this.typeMap       = this.schema.compiledTypeMap;
+  this.implicitTypes = this.schema.compiledImplicit
+  this.typeMap = this.schema.compiledTypeMap
 
-  this.length     = input.length;
-  this.position   = 0;
-  this.line       = 0;
-  this.lineStart  = 0;
-  this.lineIndent = 0;
+  this.length = input.length
+  this.position = 0
+  this.line = 0
+  this.lineStart = 0
+  this.lineIndent = 0
+  this.depth = 0
+  this.totalMergeKeys = 0
 
   // position of first leading tab in the current line,
   // used to make sure there are no tabs in the indentation
-  this.firstTabInLine = -1;
+  this.firstTabInLine = -1
 
-  this.documents = [];
+  this.documents = []
+  this.anchorMapTransactions = []
 
   /*
   this.version;
@@ -38847,164 +33308,242 @@ function State(input, options) {
   this.tag;
   this.anchor;
   this.kind;
-  this.result;*/
-
+  this.result; */
 }
 
-
-function generateError(state, message) {
-  var mark = {
-    name:     state.filename,
-    buffer:   state.input.slice(0, -1), // omit trailing \0
+function generateError (state, message) {
+  const mark = {
+    name: state.filename,
+    buffer: state.input.slice(0, -1), // omit trailing \0
     position: state.position,
-    line:     state.line,
-    column:   state.position - state.lineStart
-  };
+    line: state.line,
+    column: state.position - state.lineStart
+  }
 
-  mark.snippet = makeSnippet(mark);
+  mark.snippet = makeSnippet(mark)
 
-  return new YAMLException(message, mark);
+  return new YAMLException(message, mark)
 }
 
-function throwError(state, message) {
-  throw generateError(state, message);
+function throwError (state, message) {
+  throw generateError(state, message)
 }
 
-function throwWarning(state, message) {
+function throwWarning (state, message) {
   if (state.onWarning) {
-    state.onWarning.call(null, generateError(state, message));
+    state.onWarning.call(null, generateError(state, message))
   }
 }
 
+function storeAnchor (state, name, value) {
+  const transactions = state.anchorMapTransactions
 
-var directiveHandlers = {
+  if (transactions.length !== 0) {
+    const transaction = transactions[transactions.length - 1]
 
-  YAML: function handleYamlDirective(state, name, args) {
+    if (!_hasOwnProperty.call(transaction, name)) {
+      transaction[name] = {
+        existed: _hasOwnProperty.call(state.anchorMap, name),
+        value: state.anchorMap[name]
+      }
+    }
+  }
 
-    var match, major, minor;
+  state.anchorMap[name] = value
+}
 
+function beginAnchorTransaction (state) {
+  state.anchorMapTransactions.push(Object.create(null))
+}
+
+function commitAnchorTransaction (state) {
+  const transaction = state.anchorMapTransactions.pop()
+  const transactions = state.anchorMapTransactions
+
+  if (transactions.length === 0) return
+
+  const parent = transactions[transactions.length - 1]
+  const names = Object.keys(transaction)
+
+  for (let index = 0, length = names.length; index < length; index += 1) {
+    const name = names[index]
+
+    if (!_hasOwnProperty.call(parent, name)) {
+      parent[name] = transaction[name]
+    }
+  }
+}
+
+function rollbackAnchorTransaction (state) {
+  const transaction = state.anchorMapTransactions.pop()
+  const names = Object.keys(transaction)
+
+  for (let index = names.length - 1; index >= 0; index -= 1) {
+    const entry = transaction[names[index]]
+
+    if (entry.existed) {
+      state.anchorMap[names[index]] = entry.value
+    } else {
+      delete state.anchorMap[names[index]]
+    }
+  }
+}
+
+function snapshotState (state) {
+  return {
+    position: state.position,
+    line: state.line,
+    lineStart: state.lineStart,
+    lineIndent: state.lineIndent,
+    firstTabInLine: state.firstTabInLine,
+    tag: state.tag,
+    anchor: state.anchor,
+    kind: state.kind,
+    result: state.result
+  }
+}
+
+function restoreState (state, snapshot) {
+  state.position = snapshot.position
+  state.line = snapshot.line
+  state.lineStart = snapshot.lineStart
+  state.lineIndent = snapshot.lineIndent
+  state.firstTabInLine = snapshot.firstTabInLine
+  state.tag = snapshot.tag
+  state.anchor = snapshot.anchor
+  state.kind = snapshot.kind
+  state.result = snapshot.result
+}
+
+const directiveHandlers = {
+
+  YAML: function handleYamlDirective (state, name, args) {
     if (state.version !== null) {
-      throwError(state, 'duplication of %YAML directive');
+      throwError(state, 'duplication of %YAML directive')
     }
 
     if (args.length !== 1) {
-      throwError(state, 'YAML directive accepts exactly one argument');
+      throwError(state, 'YAML directive accepts exactly one argument')
     }
 
-    match = /^([0-9]+)\.([0-9]+)$/.exec(args[0]);
+    const match = /^([0-9]+)\.([0-9]+)$/.exec(args[0])
 
     if (match === null) {
-      throwError(state, 'ill-formed argument of the YAML directive');
+      throwError(state, 'ill-formed argument of the YAML directive')
     }
 
-    major = parseInt(match[1], 10);
-    minor = parseInt(match[2], 10);
+    const major = parseInt(match[1], 10)
+    const minor = parseInt(match[2], 10)
 
     if (major !== 1) {
-      throwError(state, 'unacceptable YAML version of the document');
+      throwError(state, 'unacceptable YAML version of the document')
     }
 
-    state.version = args[0];
-    state.checkLineBreaks = (minor < 2);
+    state.version = args[0]
+    state.checkLineBreaks = (minor < 2)
 
     if (minor !== 1 && minor !== 2) {
-      throwWarning(state, 'unsupported YAML version of the document');
+      throwWarning(state, 'unsupported YAML version of the document')
     }
   },
 
-  TAG: function handleTagDirective(state, name, args) {
-
-    var handle, prefix;
+  TAG: function handleTagDirective (state, name, args) {
+    let prefix
 
     if (args.length !== 2) {
-      throwError(state, 'TAG directive accepts exactly two arguments');
+      throwError(state, 'TAG directive accepts exactly two arguments')
     }
 
-    handle = args[0];
-    prefix = args[1];
+    const handle = args[0]
+    prefix = args[1]
 
     if (!PATTERN_TAG_HANDLE.test(handle)) {
-      throwError(state, 'ill-formed tag handle (first argument) of the TAG directive');
+      throwError(state, 'ill-formed tag handle (first argument) of the TAG directive')
     }
 
     if (_hasOwnProperty.call(state.tagMap, handle)) {
-      throwError(state, 'there is a previously declared suffix for "' + handle + '" tag handle');
+      throwError(state, 'there is a previously declared suffix for "' + handle + '" tag handle')
     }
 
     if (!PATTERN_TAG_URI.test(prefix)) {
-      throwError(state, 'ill-formed tag prefix (second argument) of the TAG directive');
+      throwError(state, 'ill-formed tag prefix (second argument) of the TAG directive')
     }
 
     try {
-      prefix = decodeURIComponent(prefix);
+      prefix = decodeURIComponent(prefix)
     } catch (err) {
-      throwError(state, 'tag prefix is malformed: ' + prefix);
+      throwError(state, 'tag prefix is malformed: ' + prefix)
     }
 
-    state.tagMap[handle] = prefix;
+    state.tagMap[handle] = prefix
   }
-};
+}
 
-
-function captureSegment(state, start, end, checkJson) {
-  var _position, _length, _character, _result;
-
+function captureSegment (state, start, end, checkJson) {
   if (start < end) {
-    _result = state.input.slice(start, end);
+    const _result = state.input.slice(start, end)
 
     if (checkJson) {
-      for (_position = 0, _length = _result.length; _position < _length; _position += 1) {
-        _character = _result.charCodeAt(_position);
+      for (let _position = 0, _length = _result.length; _position < _length; _position += 1) {
+        const _character = _result.charCodeAt(_position)
         if (!(_character === 0x09 ||
-              (0x20 <= _character && _character <= 0x10FFFF))) {
-          throwError(state, 'expected valid JSON character');
+              (_character >= 0x20 && _character <= 0x10FFFF))) {
+          throwError(state, 'expected valid JSON character')
         }
       }
     } else if (PATTERN_NON_PRINTABLE.test(_result)) {
-      throwError(state, 'the stream contains non-printable characters');
+      throwError(state, 'the stream contains non-printable characters')
     }
 
-    state.result += _result;
+    state.result += _result
   }
 }
 
-function mergeMappings(state, destination, source, overridableKeys) {
-  var sourceKeys, key, index, quantity;
+function chargeMergeWork (state) {
+  state.totalMergeKeys++
 
+  if (state.maxTotalMergeKeys !== -1 && state.totalMergeKeys > state.maxTotalMergeKeys) {
+    throwError(state, 'merge keys exceeded maxTotalMergeKeys (' + state.maxTotalMergeKeys + ')')
+  }
+}
+
+function mergeMappings (state, destination, source, overridableKeys) {
   if (!common.isObject(source)) {
-    throwError(state, 'cannot merge mappings; the provided source object is unacceptable');
+    throwError(state, 'cannot merge mappings; the provided source object is unacceptable')
   }
 
-  sourceKeys = Object.keys(source);
+  // Count the source mapping itself to bound sequences of empty mappings.
+  chargeMergeWork(state)
 
-  for (index = 0, quantity = sourceKeys.length; index < quantity; index += 1) {
-    key = sourceKeys[index];
+  const sourceKeys = Object.keys(source)
+
+  for (let index = 0, quantity = sourceKeys.length; index < quantity; index += 1) {
+    const key = sourceKeys[index]
+
+    chargeMergeWork(state)
 
     if (!_hasOwnProperty.call(destination, key)) {
-      destination[key] = source[key];
-      overridableKeys[key] = true;
+      setProperty(destination, key, source[key])
+      overridableKeys[key] = true
     }
   }
 }
 
-function storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode,
+function storeMappingPair (state, _result, overridableKeys, keyTag, keyNode, valueNode,
   startLine, startLineStart, startPos) {
-
-  var index, quantity;
-
   // The output is a plain object here, so keys can only be strings.
   // We need to convert keyNode to a string, but doing so can hang the process
   // (deeply nested arrays that explode exponentially using aliases).
   if (Array.isArray(keyNode)) {
-    keyNode = Array.prototype.slice.call(keyNode);
+    keyNode = Array.prototype.slice.call(keyNode)
 
-    for (index = 0, quantity = keyNode.length; index < quantity; index += 1) {
+    for (let index = 0, quantity = keyNode.length; index < quantity; index += 1) {
       if (Array.isArray(keyNode[index])) {
-        throwError(state, 'nested arrays are not supported inside keys');
+        throwError(state, 'nested arrays are not supported inside keys')
       }
 
       if (typeof keyNode === 'object' && _class(keyNode[index]) === '[object Object]') {
-        keyNode[index] = '[object Object]';
+        keyNode[index] = '[object Object]'
       }
     }
   }
@@ -39013,824 +33552,780 @@ function storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valu
   // (still use its own toString for arrays, timestamps,
   // and whatever user schema extensions happen to have @@toStringTag)
   if (typeof keyNode === 'object' && _class(keyNode) === '[object Object]') {
-    keyNode = '[object Object]';
+    keyNode = '[object Object]'
   }
 
-
-  keyNode = String(keyNode);
+  keyNode = String(keyNode)
 
   if (_result === null) {
-    _result = {};
+    _result = {}
   }
 
   if (keyTag === 'tag:yaml.org,2002:merge') {
     if (Array.isArray(valueNode)) {
-      for (index = 0, quantity = valueNode.length; index < quantity; index += 1) {
-        mergeMappings(state, _result, valueNode[index], overridableKeys);
+      if (valueNode.length > 100) {
+        throwError(state, 'abnormal merge sequence size')
+      }
+
+      for (let index = 0, quantity = valueNode.length; index < quantity; index += 1) {
+        mergeMappings(state, _result, valueNode[index], overridableKeys)
       }
     } else {
-      mergeMappings(state, _result, valueNode, overridableKeys);
+      mergeMappings(state, _result, valueNode, overridableKeys)
     }
   } else {
     if (!state.json &&
         !_hasOwnProperty.call(overridableKeys, keyNode) &&
         _hasOwnProperty.call(_result, keyNode)) {
-      state.line = startLine || state.line;
-      state.lineStart = startLineStart || state.lineStart;
-      state.position = startPos || state.position;
-      throwError(state, 'duplicated mapping key');
+      state.line = startLine || state.line
+      state.lineStart = startLineStart || state.lineStart
+      state.position = startPos || state.position
+      throwError(state, 'duplicated mapping key')
     }
 
-    // used for this specific key only because Object.defineProperty is slow
-    if (keyNode === '__proto__') {
-      Object.defineProperty(_result, keyNode, {
-        configurable: true,
-        enumerable: true,
-        writable: true,
-        value: valueNode
-      });
-    } else {
-      _result[keyNode] = valueNode;
-    }
-    delete overridableKeys[keyNode];
+    setProperty(_result, keyNode, valueNode)
+    delete overridableKeys[keyNode]
   }
 
-  return _result;
+  return _result
 }
 
-function readLineBreak(state) {
-  var ch;
-
-  ch = state.input.charCodeAt(state.position);
+function readLineBreak (state) {
+  const ch = state.input.charCodeAt(state.position)
 
   if (ch === 0x0A/* LF */) {
-    state.position++;
+    state.position++
   } else if (ch === 0x0D/* CR */) {
-    state.position++;
+    state.position++
     if (state.input.charCodeAt(state.position) === 0x0A/* LF */) {
-      state.position++;
+      state.position++
     }
   } else {
-    throwError(state, 'a line break is expected');
+    throwError(state, 'a line break is expected')
   }
 
-  state.line += 1;
-  state.lineStart = state.position;
-  state.firstTabInLine = -1;
+  state.line += 1
+  state.lineStart = state.position
+  state.firstTabInLine = -1
 }
 
-function skipSeparationSpace(state, allowComments, checkIndent) {
-  var lineBreaks = 0,
-      ch = state.input.charCodeAt(state.position);
+function skipSeparationSpace (state, allowComments, checkIndent) {
+  let lineBreaks = 0
+  let ch = state.input.charCodeAt(state.position)
 
   while (ch !== 0) {
-    while (is_WHITE_SPACE(ch)) {
+    while (isWhiteSpace(ch)) {
       if (ch === 0x09/* Tab */ && state.firstTabInLine === -1) {
-        state.firstTabInLine = state.position;
+        state.firstTabInLine = state.position
       }
-      ch = state.input.charCodeAt(++state.position);
+      ch = state.input.charCodeAt(++state.position)
     }
 
     if (allowComments && ch === 0x23/* # */) {
       do {
-        ch = state.input.charCodeAt(++state.position);
-      } while (ch !== 0x0A/* LF */ && ch !== 0x0D/* CR */ && ch !== 0);
+        ch = state.input.charCodeAt(++state.position)
+      } while (ch !== 0x0A/* LF */ && ch !== 0x0D/* CR */ && ch !== 0)
     }
 
-    if (is_EOL(ch)) {
-      readLineBreak(state);
+    if (isEol(ch)) {
+      readLineBreak(state)
 
-      ch = state.input.charCodeAt(state.position);
-      lineBreaks++;
-      state.lineIndent = 0;
+      ch = state.input.charCodeAt(state.position)
+      lineBreaks++
+      state.lineIndent = 0
 
       while (ch === 0x20/* Space */) {
-        state.lineIndent++;
-        ch = state.input.charCodeAt(++state.position);
+        state.lineIndent++
+        ch = state.input.charCodeAt(++state.position)
       }
     } else {
-      break;
+      break
     }
   }
 
   if (checkIndent !== -1 && lineBreaks !== 0 && state.lineIndent < checkIndent) {
-    throwWarning(state, 'deficient indentation');
+    throwWarning(state, 'deficient indentation')
   }
 
-  return lineBreaks;
+  return lineBreaks
 }
 
-function testDocumentSeparator(state) {
-  var _position = state.position,
-      ch;
-
-  ch = state.input.charCodeAt(_position);
+function testDocumentSeparator (state) {
+  let _position = state.position
+  let ch = state.input.charCodeAt(_position)
 
   // Condition state.position === state.lineStart is tested
   // in parent on each call, for efficiency. No needs to test here again.
   if ((ch === 0x2D/* - */ || ch === 0x2E/* . */) &&
       ch === state.input.charCodeAt(_position + 1) &&
       ch === state.input.charCodeAt(_position + 2)) {
+    _position += 3
 
-    _position += 3;
+    ch = state.input.charCodeAt(_position)
 
-    ch = state.input.charCodeAt(_position);
-
-    if (ch === 0 || is_WS_OR_EOL(ch)) {
-      return true;
+    if (ch === 0 || isWsOrEol(ch)) {
+      return true
     }
   }
 
-  return false;
+  return false
 }
 
-function writeFoldedLines(state, count) {
+function writeFoldedLines (state, count) {
   if (count === 1) {
-    state.result += ' ';
+    state.result += ' '
   } else if (count > 1) {
-    state.result += common.repeat('\n', count - 1);
+    state.result += common.repeat('\n', count - 1)
   }
 }
 
+function readPlainScalar (state, nodeIndent, withinFlowCollection) {
+  let captureStart
+  let captureEnd
+  let hasPendingContent
+  let _line
+  let _lineStart
+  let _lineIndent
+  const _kind = state.kind
+  const _result = state.result
 
-function readPlainScalar(state, nodeIndent, withinFlowCollection) {
-  var preceding,
-      following,
-      captureStart,
-      captureEnd,
-      hasPendingContent,
-      _line,
-      _lineStart,
-      _lineIndent,
-      _kind = state.kind,
-      _result = state.result,
-      ch;
+  let ch = state.input.charCodeAt(state.position)
 
-  ch = state.input.charCodeAt(state.position);
-
-  if (is_WS_OR_EOL(ch)      ||
-      is_FLOW_INDICATOR(ch) ||
-      ch === 0x23/* # */    ||
-      ch === 0x26/* & */    ||
-      ch === 0x2A/* * */    ||
-      ch === 0x21/* ! */    ||
-      ch === 0x7C/* | */    ||
-      ch === 0x3E/* > */    ||
-      ch === 0x27/* ' */    ||
-      ch === 0x22/* " */    ||
-      ch === 0x25/* % */    ||
-      ch === 0x40/* @ */    ||
+  if (isWsOrEol(ch) ||
+      isFlowIndicator(ch) ||
+      ch === 0x23/* # */ ||
+      ch === 0x26/* & */ ||
+      ch === 0x2A/* * */ ||
+      ch === 0x21/* ! */ ||
+      ch === 0x7C/* | */ ||
+      ch === 0x3E/* > */ ||
+      ch === 0x27/* ' */ ||
+      ch === 0x22/* " */ ||
+      ch === 0x25/* % */ ||
+      ch === 0x40/* @ */ ||
       ch === 0x60/* ` */) {
-    return false;
+    return false
   }
 
   if (ch === 0x3F/* ? */ || ch === 0x2D/* - */) {
-    following = state.input.charCodeAt(state.position + 1);
+    const following = state.input.charCodeAt(state.position + 1)
 
-    if (is_WS_OR_EOL(following) ||
-        withinFlowCollection && is_FLOW_INDICATOR(following)) {
-      return false;
+    if (isWsOrEol(following) ||
+        (withinFlowCollection && isFlowIndicator(following))) {
+      return false
     }
   }
 
-  state.kind = 'scalar';
-  state.result = '';
-  captureStart = captureEnd = state.position;
-  hasPendingContent = false;
+  state.kind = 'scalar'
+  state.result = ''
+  captureStart = captureEnd = state.position
+  hasPendingContent = false
 
   while (ch !== 0) {
     if (ch === 0x3A/* : */) {
-      following = state.input.charCodeAt(state.position + 1);
+      const following = state.input.charCodeAt(state.position + 1)
 
-      if (is_WS_OR_EOL(following) ||
-          withinFlowCollection && is_FLOW_INDICATOR(following)) {
-        break;
+      if (isWsOrEol(following) ||
+          (withinFlowCollection && isFlowIndicator(following))) {
+        break
       }
-
     } else if (ch === 0x23/* # */) {
-      preceding = state.input.charCodeAt(state.position - 1);
+      const preceding = state.input.charCodeAt(state.position - 1)
 
-      if (is_WS_OR_EOL(preceding)) {
-        break;
+      if (isWsOrEol(preceding)) {
+        break
       }
-
     } else if ((state.position === state.lineStart && testDocumentSeparator(state)) ||
-               withinFlowCollection && is_FLOW_INDICATOR(ch)) {
-      break;
-
-    } else if (is_EOL(ch)) {
-      _line = state.line;
-      _lineStart = state.lineStart;
-      _lineIndent = state.lineIndent;
-      skipSeparationSpace(state, false, -1);
+               (withinFlowCollection && isFlowIndicator(ch))) {
+      break
+    } else if (isEol(ch)) {
+      _line = state.line
+      _lineStart = state.lineStart
+      _lineIndent = state.lineIndent
+      skipSeparationSpace(state, false, -1)
 
       if (state.lineIndent >= nodeIndent) {
-        hasPendingContent = true;
-        ch = state.input.charCodeAt(state.position);
-        continue;
+        hasPendingContent = true
+        ch = state.input.charCodeAt(state.position)
+        continue
       } else {
-        state.position = captureEnd;
-        state.line = _line;
-        state.lineStart = _lineStart;
-        state.lineIndent = _lineIndent;
-        break;
+        state.position = captureEnd
+        state.line = _line
+        state.lineStart = _lineStart
+        state.lineIndent = _lineIndent
+        break
       }
     }
 
     if (hasPendingContent) {
-      captureSegment(state, captureStart, captureEnd, false);
-      writeFoldedLines(state, state.line - _line);
-      captureStart = captureEnd = state.position;
-      hasPendingContent = false;
+      captureSegment(state, captureStart, captureEnd, false)
+      writeFoldedLines(state, state.line - _line)
+      captureStart = captureEnd = state.position
+      hasPendingContent = false
     }
 
-    if (!is_WHITE_SPACE(ch)) {
-      captureEnd = state.position + 1;
+    if (!isWhiteSpace(ch)) {
+      captureEnd = state.position + 1
     }
 
-    ch = state.input.charCodeAt(++state.position);
+    ch = state.input.charCodeAt(++state.position)
   }
 
-  captureSegment(state, captureStart, captureEnd, false);
+  captureSegment(state, captureStart, captureEnd, false)
 
   if (state.result) {
-    return true;
+    return true
   }
 
-  state.kind = _kind;
-  state.result = _result;
-  return false;
+  state.kind = _kind
+  state.result = _result
+  return false
 }
 
-function readSingleQuotedScalar(state, nodeIndent) {
-  var ch,
-      captureStart, captureEnd;
+function readSingleQuotedScalar (state, nodeIndent) {
+  let captureStart
+  let captureEnd
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
   if (ch !== 0x27/* ' */) {
-    return false;
+    return false
   }
 
-  state.kind = 'scalar';
-  state.result = '';
-  state.position++;
-  captureStart = captureEnd = state.position;
+  state.kind = 'scalar'
+  state.result = ''
+  state.position++
+  captureStart = captureEnd = state.position
 
   while ((ch = state.input.charCodeAt(state.position)) !== 0) {
     if (ch === 0x27/* ' */) {
-      captureSegment(state, captureStart, state.position, true);
-      ch = state.input.charCodeAt(++state.position);
+      captureSegment(state, captureStart, state.position, true)
+      ch = state.input.charCodeAt(++state.position)
 
       if (ch === 0x27/* ' */) {
-        captureStart = state.position;
-        state.position++;
-        captureEnd = state.position;
+        captureStart = state.position
+        state.position++
+        captureEnd = state.position
       } else {
-        return true;
+        return true
       }
-
-    } else if (is_EOL(ch)) {
-      captureSegment(state, captureStart, captureEnd, true);
-      writeFoldedLines(state, skipSeparationSpace(state, false, nodeIndent));
-      captureStart = captureEnd = state.position;
-
+    } else if (isEol(ch)) {
+      captureSegment(state, captureStart, captureEnd, true)
+      writeFoldedLines(state, skipSeparationSpace(state, false, nodeIndent))
+      captureStart = captureEnd = state.position
     } else if (state.position === state.lineStart && testDocumentSeparator(state)) {
-      throwError(state, 'unexpected end of the document within a single quoted scalar');
-
+      throwError(state, 'unexpected end of the document within a single quoted scalar')
     } else {
-      state.position++;
-      captureEnd = state.position;
+      state.position++
+      if (!isWhiteSpace(ch)) {
+        captureEnd = state.position
+      }
     }
   }
 
-  throwError(state, 'unexpected end of the stream within a single quoted scalar');
+  throwError(state, 'unexpected end of the stream within a single quoted scalar')
 }
 
-function readDoubleQuotedScalar(state, nodeIndent) {
-  var captureStart,
-      captureEnd,
-      hexLength,
-      hexResult,
-      tmp,
-      ch;
+function readDoubleQuotedScalar (state, nodeIndent) {
+  let captureStart
+  let captureEnd
+  let tmp
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
   if (ch !== 0x22/* " */) {
-    return false;
+    return false
   }
 
-  state.kind = 'scalar';
-  state.result = '';
-  state.position++;
-  captureStart = captureEnd = state.position;
+  state.kind = 'scalar'
+  state.result = ''
+  state.position++
+  captureStart = captureEnd = state.position
 
   while ((ch = state.input.charCodeAt(state.position)) !== 0) {
     if (ch === 0x22/* " */) {
-      captureSegment(state, captureStart, state.position, true);
-      state.position++;
-      return true;
-
+      captureSegment(state, captureStart, state.position, true)
+      state.position++
+      return true
     } else if (ch === 0x5C/* \ */) {
-      captureSegment(state, captureStart, state.position, true);
-      ch = state.input.charCodeAt(++state.position);
+      captureSegment(state, captureStart, state.position, true)
+      ch = state.input.charCodeAt(++state.position)
 
-      if (is_EOL(ch)) {
-        skipSeparationSpace(state, false, nodeIndent);
+      if (isEol(ch)) {
+        skipSeparationSpace(state, false, nodeIndent)
 
         // TODO: rework to inline fn with no type cast?
       } else if (ch < 256 && simpleEscapeCheck[ch]) {
-        state.result += simpleEscapeMap[ch];
-        state.position++;
-
+        state.result += simpleEscapeMap[ch]
+        state.position++
       } else if ((tmp = escapedHexLen(ch)) > 0) {
-        hexLength = tmp;
-        hexResult = 0;
+        let hexLength = tmp
+        let hexResult = 0
 
         for (; hexLength > 0; hexLength--) {
-          ch = state.input.charCodeAt(++state.position);
+          ch = state.input.charCodeAt(++state.position)
 
           if ((tmp = fromHexCode(ch)) >= 0) {
-            hexResult = (hexResult << 4) + tmp;
-
+            hexResult = (hexResult << 4) + tmp
           } else {
-            throwError(state, 'expected hexadecimal character');
+            throwError(state, 'expected hexadecimal character')
           }
         }
 
-        state.result += charFromCodepoint(hexResult);
+        state.result += charFromCodepoint(hexResult)
 
-        state.position++;
-
+        state.position++
       } else {
-        throwError(state, 'unknown escape sequence');
+        throwError(state, 'unknown escape sequence')
       }
 
-      captureStart = captureEnd = state.position;
-
-    } else if (is_EOL(ch)) {
-      captureSegment(state, captureStart, captureEnd, true);
-      writeFoldedLines(state, skipSeparationSpace(state, false, nodeIndent));
-      captureStart = captureEnd = state.position;
-
+      captureStart = captureEnd = state.position
+    } else if (isEol(ch)) {
+      captureSegment(state, captureStart, captureEnd, true)
+      writeFoldedLines(state, skipSeparationSpace(state, false, nodeIndent))
+      captureStart = captureEnd = state.position
     } else if (state.position === state.lineStart && testDocumentSeparator(state)) {
-      throwError(state, 'unexpected end of the document within a double quoted scalar');
-
+      throwError(state, 'unexpected end of the document within a double quoted scalar')
     } else {
-      state.position++;
-      captureEnd = state.position;
+      state.position++
+      if (!isWhiteSpace(ch)) {
+        captureEnd = state.position
+      }
     }
   }
 
-  throwError(state, 'unexpected end of the stream within a double quoted scalar');
+  throwError(state, 'unexpected end of the stream within a double quoted scalar')
 }
 
-function readFlowCollection(state, nodeIndent) {
-  var readNext = true,
-      _line,
-      _lineStart,
-      _pos,
-      _tag     = state.tag,
-      _result,
-      _anchor  = state.anchor,
-      following,
-      terminator,
-      isPair,
-      isExplicitPair,
-      isMapping,
-      overridableKeys = Object.create(null),
-      keyNode,
-      keyTag,
-      valueNode,
-      ch;
+function readFlowCollection (state, nodeIndent) {
+  let readNext = true
+  let _line
+  let _lineStart
+  let _pos
+  const _tag = state.tag
+  let _result
+  const _anchor = state.anchor
+  let terminator
+  let isPair
+  let isExplicitPair
+  let isMapping
+  const overridableKeys = Object.create(null)
+  let keyNode
+  let keyTag
+  let valueNode
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
   if (ch === 0x5B/* [ */) {
-    terminator = 0x5D;/* ] */
-    isMapping = false;
-    _result = [];
+    terminator = 0x5D/* ] */
+    isMapping = false
+    _result = []
   } else if (ch === 0x7B/* { */) {
-    terminator = 0x7D;/* } */
-    isMapping = true;
-    _result = {};
+    terminator = 0x7D/* } */
+    isMapping = true
+    _result = {}
   } else {
-    return false;
+    return false
   }
 
   if (state.anchor !== null) {
-    state.anchorMap[state.anchor] = _result;
+    storeAnchor(state, state.anchor, _result)
   }
 
-  ch = state.input.charCodeAt(++state.position);
+  ch = state.input.charCodeAt(++state.position)
 
   while (ch !== 0) {
-    skipSeparationSpace(state, true, nodeIndent);
+    skipSeparationSpace(state, true, nodeIndent)
 
-    ch = state.input.charCodeAt(state.position);
+    ch = state.input.charCodeAt(state.position)
 
     if (ch === terminator) {
-      state.position++;
-      state.tag = _tag;
-      state.anchor = _anchor;
-      state.kind = isMapping ? 'mapping' : 'sequence';
-      state.result = _result;
-      return true;
+      state.position++
+      state.tag = _tag
+      state.anchor = _anchor
+      state.kind = isMapping ? 'mapping' : 'sequence'
+      state.result = _result
+      return true
     } else if (!readNext) {
-      throwError(state, 'missed comma between flow collection entries');
+      throwError(state, 'missed comma between flow collection entries')
     } else if (ch === 0x2C/* , */) {
       // "flow collection entries can never be completely empty", as per YAML 1.2, section 7.4
-      throwError(state, "expected the node content, but found ','");
+      throwError(state, "expected the node content, but found ','")
     }
 
-    keyTag = keyNode = valueNode = null;
-    isPair = isExplicitPair = false;
+    keyTag = keyNode = valueNode = null
+    isPair = isExplicitPair = false
 
     if (ch === 0x3F/* ? */) {
-      following = state.input.charCodeAt(state.position + 1);
+      const following = state.input.charCodeAt(state.position + 1)
 
-      if (is_WS_OR_EOL(following)) {
-        isPair = isExplicitPair = true;
-        state.position++;
-        skipSeparationSpace(state, true, nodeIndent);
+      if (isWsOrEol(following)) {
+        isPair = isExplicitPair = true
+        state.position++
+        skipSeparationSpace(state, true, nodeIndent)
       }
     }
 
-    _line = state.line; // Save the current line.
-    _lineStart = state.lineStart;
-    _pos = state.position;
-    composeNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
-    keyTag = state.tag;
-    keyNode = state.result;
-    skipSeparationSpace(state, true, nodeIndent);
+    _line = state.line // Save the current line.
+    _lineStart = state.lineStart
+    _pos = state.position
+    composeNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true)
+    keyTag = state.tag
+    keyNode = state.result
+    skipSeparationSpace(state, true, nodeIndent)
 
-    ch = state.input.charCodeAt(state.position);
+    ch = state.input.charCodeAt(state.position)
 
     if ((isExplicitPair || state.line === _line) && ch === 0x3A/* : */) {
-      isPair = true;
-      ch = state.input.charCodeAt(++state.position);
-      skipSeparationSpace(state, true, nodeIndent);
-      composeNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true);
-      valueNode = state.result;
+      isPair = true
+      ch = state.input.charCodeAt(++state.position)
+      skipSeparationSpace(state, true, nodeIndent)
+      composeNode(state, nodeIndent, CONTEXT_FLOW_IN, false, true)
+      valueNode = state.result
     }
 
     if (isMapping) {
-      storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode, _line, _lineStart, _pos);
+      storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode, _line, _lineStart, _pos)
     } else if (isPair) {
-      _result.push(storeMappingPair(state, null, overridableKeys, keyTag, keyNode, valueNode, _line, _lineStart, _pos));
+      _result.push(storeMappingPair(state, null, overridableKeys, keyTag, keyNode, valueNode, _line, _lineStart, _pos))
     } else {
-      _result.push(keyNode);
+      _result.push(keyNode)
     }
 
-    skipSeparationSpace(state, true, nodeIndent);
+    skipSeparationSpace(state, true, nodeIndent)
 
-    ch = state.input.charCodeAt(state.position);
+    ch = state.input.charCodeAt(state.position)
 
     if (ch === 0x2C/* , */) {
-      readNext = true;
-      ch = state.input.charCodeAt(++state.position);
+      readNext = true
+      ch = state.input.charCodeAt(++state.position)
     } else {
-      readNext = false;
+      readNext = false
     }
   }
 
-  throwError(state, 'unexpected end of the stream within a flow collection');
+  throwError(state, 'unexpected end of the stream within a flow collection')
 }
 
-function readBlockScalar(state, nodeIndent) {
-  var captureStart,
-      folding,
-      chomping       = CHOMPING_CLIP,
-      didReadContent = false,
-      detectedIndent = false,
-      textIndent     = nodeIndent,
-      emptyLines     = 0,
-      atMoreIndented = false,
-      tmp,
-      ch;
+function readBlockScalar (state, nodeIndent) {
+  let folding
+  let chomping = CHOMPING_CLIP
+  let didReadContent = false
+  let detectedIndent = false
+  let textIndent = nodeIndent
+  let emptyLines = 0
+  let atMoreIndented = false
+  let tmp
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
   if (ch === 0x7C/* | */) {
-    folding = false;
+    folding = false
   } else if (ch === 0x3E/* > */) {
-    folding = true;
+    folding = true
   } else {
-    return false;
+    return false
   }
 
-  state.kind = 'scalar';
-  state.result = '';
+  state.kind = 'scalar'
+  state.result = ''
 
   while (ch !== 0) {
-    ch = state.input.charCodeAt(++state.position);
+    ch = state.input.charCodeAt(++state.position)
 
     if (ch === 0x2B/* + */ || ch === 0x2D/* - */) {
       if (CHOMPING_CLIP === chomping) {
-        chomping = (ch === 0x2B/* + */) ? CHOMPING_KEEP : CHOMPING_STRIP;
+        chomping = (ch === 0x2B/* + */) ? CHOMPING_KEEP : CHOMPING_STRIP
       } else {
-        throwError(state, 'repeat of a chomping mode identifier');
+        throwError(state, 'repeat of a chomping mode identifier')
       }
-
     } else if ((tmp = fromDecimalCode(ch)) >= 0) {
       if (tmp === 0) {
-        throwError(state, 'bad explicit indentation width of a block scalar; it cannot be less than one');
+        throwError(state, 'bad explicit indentation width of a block scalar; it cannot be less than one')
       } else if (!detectedIndent) {
-        textIndent = nodeIndent + tmp - 1;
-        detectedIndent = true;
+        textIndent = nodeIndent + tmp - 1
+        detectedIndent = true
       } else {
-        throwError(state, 'repeat of an indentation width identifier');
+        throwError(state, 'repeat of an indentation width identifier')
       }
-
     } else {
-      break;
+      break
     }
   }
 
-  if (is_WHITE_SPACE(ch)) {
-    do { ch = state.input.charCodeAt(++state.position); }
-    while (is_WHITE_SPACE(ch));
+  if (isWhiteSpace(ch)) {
+    do { ch = state.input.charCodeAt(++state.position) }
+    while (isWhiteSpace(ch))
 
     if (ch === 0x23/* # */) {
-      do { ch = state.input.charCodeAt(++state.position); }
-      while (!is_EOL(ch) && (ch !== 0));
+      do { ch = state.input.charCodeAt(++state.position) }
+      while (!isEol(ch) && (ch !== 0))
     }
   }
 
   while (ch !== 0) {
-    readLineBreak(state);
-    state.lineIndent = 0;
+    readLineBreak(state)
+    state.lineIndent = 0
 
-    ch = state.input.charCodeAt(state.position);
+    ch = state.input.charCodeAt(state.position)
 
+    // eslint-disable-next-line no-unmodified-loop-condition
     while ((!detectedIndent || state.lineIndent < textIndent) &&
            (ch === 0x20/* Space */)) {
-      state.lineIndent++;
-      ch = state.input.charCodeAt(++state.position);
+      state.lineIndent++
+      ch = state.input.charCodeAt(++state.position)
     }
 
     if (!detectedIndent && state.lineIndent > textIndent) {
-      textIndent = state.lineIndent;
+      textIndent = state.lineIndent
     }
 
-    if (is_EOL(ch)) {
-      emptyLines++;
-      continue;
+    if (isEol(ch)) {
+      emptyLines++
+      continue
+    }
+
+    if (!detectedIndent && textIndent === 0) {
+      throwError(state, 'missing indentation for block scalar')
     }
 
     // End of the scalar.
     if (state.lineIndent < textIndent) {
-
       // Perform the chomping.
       if (chomping === CHOMPING_KEEP) {
-        state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines);
+        state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines)
       } else if (chomping === CHOMPING_CLIP) {
         if (didReadContent) { // i.e. only if the scalar is not empty.
-          state.result += '\n';
+          state.result += '\n'
         }
       }
 
       // Break this `while` cycle and go to the funciton's epilogue.
-      break;
+      break
     }
 
     // Folded style: use fancy rules to handle line breaks.
     if (folding) {
-
       // Lines starting with white space characters (more-indented lines) are not folded.
-      if (is_WHITE_SPACE(ch)) {
-        atMoreIndented = true;
+      if (isWhiteSpace(ch)) {
+        atMoreIndented = true
         // except for the first content line (cf. Example 8.1)
-        state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines);
+        state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines)
 
       // End of more-indented block.
       } else if (atMoreIndented) {
-        atMoreIndented = false;
-        state.result += common.repeat('\n', emptyLines + 1);
+        atMoreIndented = false
+        state.result += common.repeat('\n', emptyLines + 1)
 
       // Just one line break - perceive as the same line.
       } else if (emptyLines === 0) {
         if (didReadContent) { // i.e. only if we have already read some scalar content.
-          state.result += ' ';
+          state.result += ' '
         }
 
       // Several line breaks - perceive as different lines.
       } else {
-        state.result += common.repeat('\n', emptyLines);
+        state.result += common.repeat('\n', emptyLines)
       }
 
     // Literal style: just add exact number of line breaks between content lines.
     } else {
       // Keep all line breaks except the header line break.
-      state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines);
+      state.result += common.repeat('\n', didReadContent ? 1 + emptyLines : emptyLines)
     }
 
-    didReadContent = true;
-    detectedIndent = true;
-    emptyLines = 0;
-    captureStart = state.position;
+    didReadContent = true
+    detectedIndent = true
+    emptyLines = 0
+    const captureStart = state.position
 
-    while (!is_EOL(ch) && (ch !== 0)) {
-      ch = state.input.charCodeAt(++state.position);
+    while (!isEol(ch) && (ch !== 0)) {
+      ch = state.input.charCodeAt(++state.position)
     }
 
-    captureSegment(state, captureStart, state.position, false);
+    captureSegment(state, captureStart, state.position, false)
   }
 
-  return true;
+  return true
 }
 
-function readBlockSequence(state, nodeIndent) {
-  var _line,
-      _tag      = state.tag,
-      _anchor   = state.anchor,
-      _result   = [],
-      following,
-      detected  = false,
-      ch;
+function readBlockSequence (state, nodeIndent) {
+  const _tag = state.tag
+  const _anchor = state.anchor
+  const _result = []
+  let detected = false
 
   // there is a leading tab before this token, so it can't be a block sequence/mapping;
   // it can still be flow sequence/mapping or a scalar
-  if (state.firstTabInLine !== -1) return false;
+  if (state.firstTabInLine !== -1) return false
 
   if (state.anchor !== null) {
-    state.anchorMap[state.anchor] = _result;
+    storeAnchor(state, state.anchor, _result)
   }
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
   while (ch !== 0) {
     if (state.firstTabInLine !== -1) {
-      state.position = state.firstTabInLine;
-      throwError(state, 'tab characters must not be used in indentation');
+      state.position = state.firstTabInLine
+      throwError(state, 'tab characters must not be used in indentation')
     }
 
     if (ch !== 0x2D/* - */) {
-      break;
+      break
     }
 
-    following = state.input.charCodeAt(state.position + 1);
+    const following = state.input.charCodeAt(state.position + 1)
 
-    if (!is_WS_OR_EOL(following)) {
-      break;
+    if (!isWsOrEol(following)) {
+      break
     }
 
-    detected = true;
-    state.position++;
+    detected = true
+    state.position++
 
     if (skipSeparationSpace(state, true, -1)) {
       if (state.lineIndent <= nodeIndent) {
-        _result.push(null);
-        ch = state.input.charCodeAt(state.position);
-        continue;
+        _result.push(null)
+        ch = state.input.charCodeAt(state.position)
+        continue
       }
     }
 
-    _line = state.line;
-    composeNode(state, nodeIndent, CONTEXT_BLOCK_IN, false, true);
-    _result.push(state.result);
-    skipSeparationSpace(state, true, -1);
+    const _line = state.line
+    composeNode(state, nodeIndent, CONTEXT_BLOCK_IN, false, true)
+    _result.push(state.result)
+    skipSeparationSpace(state, true, -1)
 
-    ch = state.input.charCodeAt(state.position);
+    ch = state.input.charCodeAt(state.position)
 
     if ((state.line === _line || state.lineIndent > nodeIndent) && (ch !== 0)) {
-      throwError(state, 'bad indentation of a sequence entry');
+      throwError(state, 'bad indentation of a sequence entry')
     } else if (state.lineIndent < nodeIndent) {
-      break;
+      break
     }
   }
 
   if (detected) {
-    state.tag = _tag;
-    state.anchor = _anchor;
-    state.kind = 'sequence';
-    state.result = _result;
-    return true;
+    state.tag = _tag
+    state.anchor = _anchor
+    state.kind = 'sequence'
+    state.result = _result
+    return true
   }
-  return false;
+  return false
 }
 
-function readBlockMapping(state, nodeIndent, flowIndent) {
-  var following,
-      allowCompact,
-      _line,
-      _keyLine,
-      _keyLineStart,
-      _keyPos,
-      _tag          = state.tag,
-      _anchor       = state.anchor,
-      _result       = {},
-      overridableKeys = Object.create(null),
-      keyTag        = null,
-      keyNode       = null,
-      valueNode     = null,
-      atExplicitKey = false,
-      detected      = false,
-      ch;
+function readBlockMapping (state, nodeIndent, flowIndent) {
+  let allowCompact
+  let _keyLine
+  let _keyLineStart
+  let _keyPos
+  const _tag = state.tag
+  const _anchor = state.anchor
+  const _result = {}
+  const overridableKeys = Object.create(null)
+  let keyTag = null
+  let keyNode = null
+  let valueNode = null
+  let atExplicitKey = false
+  let detected = false
 
   // there is a leading tab before this token, so it can't be a block sequence/mapping;
   // it can still be flow sequence/mapping or a scalar
-  if (state.firstTabInLine !== -1) return false;
+  if (state.firstTabInLine !== -1) return false
 
   if (state.anchor !== null) {
-    state.anchorMap[state.anchor] = _result;
+    storeAnchor(state, state.anchor, _result)
   }
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
   while (ch !== 0) {
     if (!atExplicitKey && state.firstTabInLine !== -1) {
-      state.position = state.firstTabInLine;
-      throwError(state, 'tab characters must not be used in indentation');
+      state.position = state.firstTabInLine
+      throwError(state, 'tab characters must not be used in indentation')
     }
 
-    following = state.input.charCodeAt(state.position + 1);
-    _line = state.line; // Save the current line.
+    const following = state.input.charCodeAt(state.position + 1)
+    const _line = state.line // Save the current line.
 
     //
     // Explicit notation case. There are two separate blocks:
     // first for the key (denoted by "?") and second for the value (denoted by ":")
     //
-    if ((ch === 0x3F/* ? */ || ch === 0x3A/* : */) && is_WS_OR_EOL(following)) {
-
+    if ((ch === 0x3F/* ? */ || ch === 0x3A/* : */) && isWsOrEol(following)) {
       if (ch === 0x3F/* ? */) {
         if (atExplicitKey) {
-          storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos);
-          keyTag = keyNode = valueNode = null;
+          storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos)
+          keyTag = keyNode = valueNode = null
         }
 
-        detected = true;
-        atExplicitKey = true;
-        allowCompact = true;
-
+        detected = true
+        atExplicitKey = true
+        allowCompact = true
       } else if (atExplicitKey) {
         // i.e. 0x3A/* : */ === character after the explicit key.
-        atExplicitKey = false;
-        allowCompact = true;
-
+        atExplicitKey = false
+        allowCompact = true
       } else {
-        throwError(state, 'incomplete explicit mapping pair; a key node is missed; or followed by a non-tabulated empty line');
+        throwError(state, 'incomplete explicit mapping pair; a key node is missed; or followed by a non-tabulated empty line')
       }
 
-      state.position += 1;
-      ch = following;
+      state.position += 1
+      ch = following
 
     //
     // Implicit notation case. Flow-style node as the key first, then ":", and the value.
     //
     } else {
-      _keyLine = state.line;
-      _keyLineStart = state.lineStart;
-      _keyPos = state.position;
+      _keyLine = state.line
+      _keyLineStart = state.lineStart
+      _keyPos = state.position
 
       if (!composeNode(state, flowIndent, CONTEXT_FLOW_OUT, false, true)) {
         // Neither implicit nor explicit notation.
         // Reading is done. Go to the epilogue.
-        break;
+        break
       }
 
       if (state.line === _line) {
-        ch = state.input.charCodeAt(state.position);
+        ch = state.input.charCodeAt(state.position)
 
-        while (is_WHITE_SPACE(ch)) {
-          ch = state.input.charCodeAt(++state.position);
+        while (isWhiteSpace(ch)) {
+          ch = state.input.charCodeAt(++state.position)
         }
 
         if (ch === 0x3A/* : */) {
-          ch = state.input.charCodeAt(++state.position);
+          ch = state.input.charCodeAt(++state.position)
 
-          if (!is_WS_OR_EOL(ch)) {
-            throwError(state, 'a whitespace character is expected after the key-value separator within a block mapping');
+          if (!isWsOrEol(ch)) {
+            throwError(state, 'a whitespace character is expected after the key-value separator within a block mapping')
           }
 
           if (atExplicitKey) {
-            storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos);
-            keyTag = keyNode = valueNode = null;
+            storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos)
+            keyTag = keyNode = valueNode = null
           }
 
-          detected = true;
-          atExplicitKey = false;
-          allowCompact = false;
-          keyTag = state.tag;
-          keyNode = state.result;
-
+          detected = true
+          atExplicitKey = false
+          allowCompact = false
+          keyTag = state.tag
+          keyNode = state.result
         } else if (detected) {
-          throwError(state, 'can not read an implicit mapping pair; a colon is missed');
-
+          throwError(state, 'can not read an implicit mapping pair; a colon is missed')
         } else {
-          state.tag = _tag;
-          state.anchor = _anchor;
-          return true; // Keep the result of `composeNode`.
+          state.tag = _tag
+          state.anchor = _anchor
+          return true // Keep the result of `composeNode`.
         }
-
       } else if (detected) {
-        throwError(state, 'can not read a block mapping entry; a multiline key may not be an implicit key');
-
+        throwError(state, 'can not read a block mapping entry; a multiline key may not be an implicit key')
       } else {
-        state.tag = _tag;
-        state.anchor = _anchor;
-        return true; // Keep the result of `composeNode`.
+        state.tag = _tag
+        state.anchor = _anchor
+        return true // Keep the result of `composeNode`.
       }
     }
 
@@ -39839,32 +34334,32 @@ function readBlockMapping(state, nodeIndent, flowIndent) {
     //
     if (state.line === _line || state.lineIndent > nodeIndent) {
       if (atExplicitKey) {
-        _keyLine = state.line;
-        _keyLineStart = state.lineStart;
-        _keyPos = state.position;
+        _keyLine = state.line
+        _keyLineStart = state.lineStart
+        _keyPos = state.position
       }
 
       if (composeNode(state, nodeIndent, CONTEXT_BLOCK_OUT, true, allowCompact)) {
         if (atExplicitKey) {
-          keyNode = state.result;
+          keyNode = state.result
         } else {
-          valueNode = state.result;
+          valueNode = state.result
         }
       }
 
       if (!atExplicitKey) {
-        storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode, _keyLine, _keyLineStart, _keyPos);
-        keyTag = keyNode = valueNode = null;
+        storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, valueNode, _keyLine, _keyLineStart, _keyPos)
+        keyTag = keyNode = valueNode = null
       }
 
-      skipSeparationSpace(state, true, -1);
-      ch = state.input.charCodeAt(state.position);
+      skipSeparationSpace(state, true, -1)
+      ch = state.input.charCodeAt(state.position)
     }
 
     if ((state.line === _line || state.lineIndent > nodeIndent) && (ch !== 0)) {
-      throwError(state, 'bad indentation of a mapping entry');
+      throwError(state, 'bad indentation of a mapping entry')
     } else if (state.lineIndent < nodeIndent) {
-      break;
+      break
     }
   }
 
@@ -39874,293 +34369,330 @@ function readBlockMapping(state, nodeIndent, flowIndent) {
 
   // Special case: last mapping's node contains only the key in explicit notation.
   if (atExplicitKey) {
-    storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos);
+    storeMappingPair(state, _result, overridableKeys, keyTag, keyNode, null, _keyLine, _keyLineStart, _keyPos)
   }
 
   // Expose the resulting mapping.
   if (detected) {
-    state.tag = _tag;
-    state.anchor = _anchor;
-    state.kind = 'mapping';
-    state.result = _result;
+    state.tag = _tag
+    state.anchor = _anchor
+    state.kind = 'mapping'
+    state.result = _result
   }
 
-  return detected;
+  return detected
 }
 
-function readTagProperty(state) {
-  var _position,
-      isVerbatim = false,
-      isNamed    = false,
-      tagHandle,
-      tagName,
-      ch;
+function readTagProperty (state) {
+  let isVerbatim = false
+  let isNamed = false
+  let tagHandle
+  let tagName
 
-  ch = state.input.charCodeAt(state.position);
+  let ch = state.input.charCodeAt(state.position)
 
-  if (ch !== 0x21/* ! */) return false;
+  if (ch !== 0x21/* ! */) return false
 
   if (state.tag !== null) {
-    throwError(state, 'duplication of a tag property');
+    throwError(state, 'duplication of a tag property')
   }
 
-  ch = state.input.charCodeAt(++state.position);
+  ch = state.input.charCodeAt(++state.position)
 
   if (ch === 0x3C/* < */) {
-    isVerbatim = true;
-    ch = state.input.charCodeAt(++state.position);
-
+    isVerbatim = true
+    ch = state.input.charCodeAt(++state.position)
   } else if (ch === 0x21/* ! */) {
-    isNamed = true;
-    tagHandle = '!!';
-    ch = state.input.charCodeAt(++state.position);
-
+    isNamed = true
+    tagHandle = '!!'
+    ch = state.input.charCodeAt(++state.position)
   } else {
-    tagHandle = '!';
+    tagHandle = '!'
   }
 
-  _position = state.position;
+  let _position = state.position
 
   if (isVerbatim) {
-    do { ch = state.input.charCodeAt(++state.position); }
-    while (ch !== 0 && ch !== 0x3E/* > */);
+    do { ch = state.input.charCodeAt(++state.position) }
+    while (ch !== 0 && ch !== 0x3E/* > */)
 
     if (state.position < state.length) {
-      tagName = state.input.slice(_position, state.position);
-      ch = state.input.charCodeAt(++state.position);
+      tagName = state.input.slice(_position, state.position)
+      ch = state.input.charCodeAt(++state.position)
     } else {
-      throwError(state, 'unexpected end of the stream within a verbatim tag');
+      throwError(state, 'unexpected end of the stream within a verbatim tag')
     }
   } else {
-    while (ch !== 0 && !is_WS_OR_EOL(ch)) {
-
+    while (ch !== 0 && !isWsOrEol(ch)) {
       if (ch === 0x21/* ! */) {
         if (!isNamed) {
-          tagHandle = state.input.slice(_position - 1, state.position + 1);
+          tagHandle = state.input.slice(_position - 1, state.position + 1)
 
           if (!PATTERN_TAG_HANDLE.test(tagHandle)) {
-            throwError(state, 'named tag handle cannot contain such characters');
+            throwError(state, 'named tag handle cannot contain such characters')
           }
 
-          isNamed = true;
-          _position = state.position + 1;
+          isNamed = true
+          _position = state.position + 1
         } else {
-          throwError(state, 'tag suffix cannot contain exclamation marks');
+          throwError(state, 'tag suffix cannot contain exclamation marks')
         }
       }
 
-      ch = state.input.charCodeAt(++state.position);
+      ch = state.input.charCodeAt(++state.position)
     }
 
-    tagName = state.input.slice(_position, state.position);
+    tagName = state.input.slice(_position, state.position)
 
     if (PATTERN_FLOW_INDICATORS.test(tagName)) {
-      throwError(state, 'tag suffix cannot contain flow indicator characters');
+      throwError(state, 'tag suffix cannot contain flow indicator characters')
     }
   }
 
   if (tagName && !PATTERN_TAG_URI.test(tagName)) {
-    throwError(state, 'tag name cannot contain such characters: ' + tagName);
+    throwError(state, 'tag name cannot contain such characters: ' + tagName)
   }
 
   try {
-    tagName = decodeURIComponent(tagName);
+    tagName = decodeURIComponent(tagName)
   } catch (err) {
-    throwError(state, 'tag name is malformed: ' + tagName);
+    throwError(state, 'tag name is malformed: ' + tagName)
   }
 
   if (isVerbatim) {
-    state.tag = tagName;
-
+    state.tag = tagName
   } else if (_hasOwnProperty.call(state.tagMap, tagHandle)) {
-    state.tag = state.tagMap[tagHandle] + tagName;
-
+    state.tag = state.tagMap[tagHandle] + tagName
   } else if (tagHandle === '!') {
-    state.tag = '!' + tagName;
-
+    state.tag = '!' + tagName
   } else if (tagHandle === '!!') {
-    state.tag = 'tag:yaml.org,2002:' + tagName;
-
+    state.tag = 'tag:yaml.org,2002:' + tagName
   } else {
-    throwError(state, 'undeclared tag handle "' + tagHandle + '"');
+    throwError(state, 'undeclared tag handle "' + tagHandle + '"')
   }
 
-  return true;
+  return true
 }
 
-function readAnchorProperty(state) {
-  var _position,
-      ch;
+function readAnchorProperty (state) {
+  let ch = state.input.charCodeAt(state.position)
 
-  ch = state.input.charCodeAt(state.position);
-
-  if (ch !== 0x26/* & */) return false;
+  if (ch !== 0x26/* & */) return false
 
   if (state.anchor !== null) {
-    throwError(state, 'duplication of an anchor property');
+    throwError(state, 'duplication of an anchor property')
   }
 
-  ch = state.input.charCodeAt(++state.position);
-  _position = state.position;
+  ch = state.input.charCodeAt(++state.position)
+  const _position = state.position
 
-  while (ch !== 0 && !is_WS_OR_EOL(ch) && !is_FLOW_INDICATOR(ch)) {
-    ch = state.input.charCodeAt(++state.position);
+  while (ch !== 0 && !isWsOrEol(ch) && !isFlowIndicator(ch)) {
+    ch = state.input.charCodeAt(++state.position)
   }
 
   if (state.position === _position) {
-    throwError(state, 'name of an anchor node must contain at least one character');
+    throwError(state, 'name of an anchor node must contain at least one character')
   }
 
-  state.anchor = state.input.slice(_position, state.position);
-  return true;
+  state.anchor = state.input.slice(_position, state.position)
+  return true
 }
 
-function readAlias(state) {
-  var _position, alias,
-      ch;
+function readAlias (state) {
+  let ch = state.input.charCodeAt(state.position)
 
-  ch = state.input.charCodeAt(state.position);
+  if (ch !== 0x2A/* * */) return false
 
-  if (ch !== 0x2A/* * */) return false;
+  ch = state.input.charCodeAt(++state.position)
+  const _position = state.position
 
-  ch = state.input.charCodeAt(++state.position);
-  _position = state.position;
-
-  while (ch !== 0 && !is_WS_OR_EOL(ch) && !is_FLOW_INDICATOR(ch)) {
-    ch = state.input.charCodeAt(++state.position);
+  while (ch !== 0 && !isWsOrEol(ch) && !isFlowIndicator(ch)) {
+    ch = state.input.charCodeAt(++state.position)
   }
 
   if (state.position === _position) {
-    throwError(state, 'name of an alias node must contain at least one character');
+    throwError(state, 'name of an alias node must contain at least one character')
   }
 
-  alias = state.input.slice(_position, state.position);
+  const alias = state.input.slice(_position, state.position)
 
   if (!_hasOwnProperty.call(state.anchorMap, alias)) {
-    throwError(state, 'unidentified alias "' + alias + '"');
+    throwError(state, 'unidentified alias "' + alias + '"')
   }
 
-  state.result = state.anchorMap[alias];
-  skipSeparationSpace(state, true, -1);
-  return true;
+  state.result = state.anchorMap[alias]
+  skipSeparationSpace(state, true, -1)
+  return true
 }
 
-function composeNode(state, parentIndent, nodeContext, allowToSeek, allowCompact) {
-  var allowBlockStyles,
-      allowBlockScalars,
-      allowBlockCollections,
-      indentStatus = 1, // 1: this>parent, 0: this=parent, -1: this<parent
-      atNewLine  = false,
-      hasContent = false,
-      typeIndex,
-      typeQuantity,
-      typeList,
-      type,
-      flowIndent,
-      blockIndent;
+function tryReadBlockMappingFromProperty (state, propertyStart, nodeIndent, flowIndent) {
+  const fallbackState = snapshotState(state)
 
-  if (state.listener !== null) {
-    state.listener('open', state);
+  beginAnchorTransaction(state)
+  restoreState(state, propertyStart)
+
+  // Re-read the leading properties as part of the first implicit key, not as
+  // properties of the current node.
+  state.tag = null
+  state.anchor = null
+  state.kind = null
+  state.result = null
+
+  if (readBlockMapping(state, nodeIndent, flowIndent) && state.kind === 'mapping') {
+    commitAnchorTransaction(state)
+    return true
   }
 
-  state.tag    = null;
-  state.anchor = null;
-  state.kind   = null;
-  state.result = null;
+  rollbackAnchorTransaction(state)
+  restoreState(state, fallbackState)
+  return false
+}
 
-  allowBlockStyles = allowBlockScalars = allowBlockCollections =
+function composeNode (state, parentIndent, nodeContext, allowToSeek, allowCompact) {
+  let allowBlockScalars
+  let allowBlockCollections
+  let indentStatus = 1 // 1: this>parent, 0: this=parent, -1: this<parent
+  let atNewLine = false
+  let hasContent = false
+  let propertyStart = null
+  let type
+  let flowIndent
+  let blockIndent
+
+  if (state.depth >= state.maxDepth) {
+    throwError(state, 'nesting exceeded maxDepth (' + state.maxDepth + ')')
+  }
+
+  state.depth += 1
+
+  if (state.listener !== null) {
+    state.listener('open', state)
+  }
+
+  state.tag = null
+  state.anchor = null
+  state.kind = null
+  state.result = null
+
+  const allowBlockStyles = allowBlockScalars = allowBlockCollections =
     CONTEXT_BLOCK_OUT === nodeContext ||
-    CONTEXT_BLOCK_IN  === nodeContext;
+    CONTEXT_BLOCK_IN === nodeContext
 
   if (allowToSeek) {
     if (skipSeparationSpace(state, true, -1)) {
-      atNewLine = true;
+      atNewLine = true
 
       if (state.lineIndent > parentIndent) {
-        indentStatus = 1;
+        indentStatus = 1
       } else if (state.lineIndent === parentIndent) {
-        indentStatus = 0;
+        indentStatus = 0
       } else if (state.lineIndent < parentIndent) {
-        indentStatus = -1;
+        indentStatus = -1
       }
     }
   }
 
   if (indentStatus === 1) {
-    while (readTagProperty(state) || readAnchorProperty(state)) {
+    while (true) {
+      const ch = state.input.charCodeAt(state.position)
+      const propertyState = snapshotState(state)
+
+      // A duplicate property token after a line break can be the first key of
+      // a nested block mapping, e.g. `!!map\n  !!str key: value`.
+      if (atNewLine &&
+          ((ch === 0x21/* ! */ && state.tag !== null) ||
+           (ch === 0x26/* & */ && state.anchor !== null))) {
+        break
+      }
+
+      if (!readTagProperty(state) && !readAnchorProperty(state)) {
+        break
+      }
+
+      if (propertyStart === null) {
+        propertyStart = propertyState
+      }
+
       if (skipSeparationSpace(state, true, -1)) {
-        atNewLine = true;
-        allowBlockCollections = allowBlockStyles;
+        atNewLine = true
+        allowBlockCollections = allowBlockStyles
 
         if (state.lineIndent > parentIndent) {
-          indentStatus = 1;
+          indentStatus = 1
         } else if (state.lineIndent === parentIndent) {
-          indentStatus = 0;
+          indentStatus = 0
         } else if (state.lineIndent < parentIndent) {
-          indentStatus = -1;
+          indentStatus = -1
         }
       } else {
-        allowBlockCollections = false;
+        allowBlockCollections = false
       }
     }
   }
 
   if (allowBlockCollections) {
-    allowBlockCollections = atNewLine || allowCompact;
+    allowBlockCollections = atNewLine || allowCompact
   }
 
   if (indentStatus === 1 || CONTEXT_BLOCK_OUT === nodeContext) {
     if (CONTEXT_FLOW_IN === nodeContext || CONTEXT_FLOW_OUT === nodeContext) {
-      flowIndent = parentIndent;
+      flowIndent = parentIndent
     } else {
-      flowIndent = parentIndent + 1;
+      flowIndent = parentIndent + 1
     }
 
-    blockIndent = state.position - state.lineStart;
+    blockIndent = state.position - state.lineStart
 
     if (indentStatus === 1) {
-      if (allowBlockCollections &&
-          (readBlockSequence(state, blockIndent) ||
-           readBlockMapping(state, blockIndent, flowIndent)) ||
+      if ((allowBlockCollections &&
+          (readBlockSequence(state, blockIndent) || readBlockMapping(state, blockIndent, flowIndent))) ||
           readFlowCollection(state, flowIndent)) {
-        hasContent = true;
+        hasContent = true
       } else {
-        if ((allowBlockScalars && readBlockScalar(state, flowIndent)) ||
+        const ch = state.input.charCodeAt(state.position)
+
+        if (propertyStart !== null && allowBlockStyles && !allowBlockCollections &&
+            ch !== 0x7C/* | */ && ch !== 0x3E/* > */ &&
+            tryReadBlockMappingFromProperty(
+              state,
+              propertyStart,
+              propertyStart.position - propertyStart.lineStart,
+              flowIndent
+            )) {
+          hasContent = true
+        } else if ((allowBlockScalars && readBlockScalar(state, flowIndent)) ||
             readSingleQuotedScalar(state, flowIndent) ||
             readDoubleQuotedScalar(state, flowIndent)) {
-          hasContent = true;
-
+          hasContent = true
         } else if (readAlias(state)) {
-          hasContent = true;
+          hasContent = true
 
           if (state.tag !== null || state.anchor !== null) {
-            throwError(state, 'alias node should not have any properties');
+            throwError(state, 'alias node should not have any properties')
           }
-
         } else if (readPlainScalar(state, flowIndent, CONTEXT_FLOW_IN === nodeContext)) {
-          hasContent = true;
+          hasContent = true
 
           if (state.tag === null) {
-            state.tag = '?';
+            state.tag = '?'
           }
         }
 
         if (state.anchor !== null) {
-          state.anchorMap[state.anchor] = state.result;
+          storeAnchor(state, state.anchor, state.result)
         }
       }
     } else if (indentStatus === 0) {
       // Special case: block sequences are allowed to have same indentation level as the parent.
       // http://www.yaml.org/spec/1.2/spec.html#id2799784
-      hasContent = allowBlockCollections && readBlockSequence(state, blockIndent);
+      hasContent = allowBlockCollections && readBlockSequence(state, blockIndent)
     }
   }
 
   if (state.tag === null) {
     if (state.anchor !== null) {
-      state.anchorMap[state.anchor] = state.result;
+      storeAnchor(state, state.anchor, state.result)
     }
-
   } else if (state.tag === '?') {
     // Implicit resolving is not allowed for non-scalar types, and '?'
     // non-specific tag is only automatically assigned to plain scalars.
@@ -40169,245 +34701,234 @@ function composeNode(state, parentIndent, nodeContext, allowToSeek, allowCompact
     // tag, for example like this: "!<?> [0]"
     //
     if (state.result !== null && state.kind !== 'scalar') {
-      throwError(state, 'unacceptable node kind for !<?> tag; it should be "scalar", not "' + state.kind + '"');
+      throwError(state, 'unacceptable node kind for !<?> tag; it should be "scalar", not "' + state.kind + '"')
     }
 
-    for (typeIndex = 0, typeQuantity = state.implicitTypes.length; typeIndex < typeQuantity; typeIndex += 1) {
-      type = state.implicitTypes[typeIndex];
+    for (let typeIndex = 0, typeQuantity = state.implicitTypes.length; typeIndex < typeQuantity; typeIndex += 1) {
+      type = state.implicitTypes[typeIndex]
 
       if (type.resolve(state.result)) { // `state.result` updated in resolver if matched
-        state.result = type.construct(state.result);
-        state.tag = type.tag;
+        state.result = type.construct(state.result)
+        state.tag = type.tag
         if (state.anchor !== null) {
-          state.anchorMap[state.anchor] = state.result;
+          storeAnchor(state, state.anchor, state.result)
         }
-        break;
+        break
       }
     }
   } else if (state.tag !== '!') {
     if (_hasOwnProperty.call(state.typeMap[state.kind || 'fallback'], state.tag)) {
-      type = state.typeMap[state.kind || 'fallback'][state.tag];
+      type = state.typeMap[state.kind || 'fallback'][state.tag]
     } else {
       // looking for multi type
-      type = null;
-      typeList = state.typeMap.multi[state.kind || 'fallback'];
+      type = null
+      const typeList = state.typeMap.multi[state.kind || 'fallback']
 
-      for (typeIndex = 0, typeQuantity = typeList.length; typeIndex < typeQuantity; typeIndex += 1) {
+      for (let typeIndex = 0, typeQuantity = typeList.length; typeIndex < typeQuantity; typeIndex += 1) {
         if (state.tag.slice(0, typeList[typeIndex].tag.length) === typeList[typeIndex].tag) {
-          type = typeList[typeIndex];
-          break;
+          type = typeList[typeIndex]
+          break
         }
       }
     }
 
     if (!type) {
-      throwError(state, 'unknown tag !<' + state.tag + '>');
+      throwError(state, 'unknown tag !<' + state.tag + '>')
     }
 
     if (state.result !== null && type.kind !== state.kind) {
-      throwError(state, 'unacceptable node kind for !<' + state.tag + '> tag; it should be "' + type.kind + '", not "' + state.kind + '"');
+      throwError(state, 'unacceptable node kind for !<' + state.tag + '> tag; it should be "' + type.kind + '", not "' + state.kind + '"')
     }
 
     if (!type.resolve(state.result, state.tag)) { // `state.result` updated in resolver if matched
-      throwError(state, 'cannot resolve a node with !<' + state.tag + '> explicit tag');
+      throwError(state, 'cannot resolve a node with !<' + state.tag + '> explicit tag')
     } else {
-      state.result = type.construct(state.result, state.tag);
+      state.result = type.construct(state.result, state.tag)
       if (state.anchor !== null) {
-        state.anchorMap[state.anchor] = state.result;
+        storeAnchor(state, state.anchor, state.result)
       }
     }
   }
 
   if (state.listener !== null) {
-    state.listener('close', state);
+    state.listener('close', state)
   }
-  return state.tag !== null ||  state.anchor !== null || hasContent;
+
+  state.depth -= 1
+  return state.tag !== null || state.anchor !== null || hasContent
 }
 
-function readDocument(state) {
-  var documentStart = state.position,
-      _position,
-      directiveName,
-      directiveArgs,
-      hasDirectives = false,
-      ch;
+function readDocument (state) {
+  const documentStart = state.position
+  let hasDirectives = false
+  let ch
 
-  state.version = null;
-  state.checkLineBreaks = state.legacy;
-  state.tagMap = Object.create(null);
-  state.anchorMap = Object.create(null);
+  state.version = null
+  state.checkLineBreaks = state.legacy
+  state.tagMap = Object.create(null)
+  state.anchorMap = Object.create(null)
 
   while ((ch = state.input.charCodeAt(state.position)) !== 0) {
-    skipSeparationSpace(state, true, -1);
+    skipSeparationSpace(state, true, -1)
 
-    ch = state.input.charCodeAt(state.position);
+    ch = state.input.charCodeAt(state.position)
 
     if (state.lineIndent > 0 || ch !== 0x25/* % */) {
-      break;
+      break
     }
 
-    hasDirectives = true;
-    ch = state.input.charCodeAt(++state.position);
-    _position = state.position;
+    hasDirectives = true
+    ch = state.input.charCodeAt(++state.position)
+    let _position = state.position
 
-    while (ch !== 0 && !is_WS_OR_EOL(ch)) {
-      ch = state.input.charCodeAt(++state.position);
+    while (ch !== 0 && !isWsOrEol(ch)) {
+      ch = state.input.charCodeAt(++state.position)
     }
 
-    directiveName = state.input.slice(_position, state.position);
-    directiveArgs = [];
+    const directiveName = state.input.slice(_position, state.position)
+    const directiveArgs = []
 
     if (directiveName.length < 1) {
-      throwError(state, 'directive name must not be less than one character in length');
+      throwError(state, 'directive name must not be less than one character in length')
     }
 
     while (ch !== 0) {
-      while (is_WHITE_SPACE(ch)) {
-        ch = state.input.charCodeAt(++state.position);
+      while (isWhiteSpace(ch)) {
+        ch = state.input.charCodeAt(++state.position)
       }
 
       if (ch === 0x23/* # */) {
-        do { ch = state.input.charCodeAt(++state.position); }
-        while (ch !== 0 && !is_EOL(ch));
-        break;
+        do { ch = state.input.charCodeAt(++state.position) }
+        while (ch !== 0 && !isEol(ch))
+        break
       }
 
-      if (is_EOL(ch)) break;
+      if (isEol(ch)) break
 
-      _position = state.position;
+      _position = state.position
 
-      while (ch !== 0 && !is_WS_OR_EOL(ch)) {
-        ch = state.input.charCodeAt(++state.position);
+      while (ch !== 0 && !isWsOrEol(ch)) {
+        ch = state.input.charCodeAt(++state.position)
       }
 
-      directiveArgs.push(state.input.slice(_position, state.position));
+      directiveArgs.push(state.input.slice(_position, state.position))
     }
 
-    if (ch !== 0) readLineBreak(state);
+    if (ch !== 0) readLineBreak(state)
 
     if (_hasOwnProperty.call(directiveHandlers, directiveName)) {
-      directiveHandlers[directiveName](state, directiveName, directiveArgs);
+      directiveHandlers[directiveName](state, directiveName, directiveArgs)
     } else {
-      throwWarning(state, 'unknown document directive "' + directiveName + '"');
+      throwWarning(state, 'unknown document directive "' + directiveName + '"')
     }
   }
 
-  skipSeparationSpace(state, true, -1);
+  skipSeparationSpace(state, true, -1)
 
   if (state.lineIndent === 0 &&
-      state.input.charCodeAt(state.position)     === 0x2D/* - */ &&
+      state.input.charCodeAt(state.position) === 0x2D/* - */ &&
       state.input.charCodeAt(state.position + 1) === 0x2D/* - */ &&
       state.input.charCodeAt(state.position + 2) === 0x2D/* - */) {
-    state.position += 3;
-    skipSeparationSpace(state, true, -1);
-
+    state.position += 3
+    skipSeparationSpace(state, true, -1)
   } else if (hasDirectives) {
-    throwError(state, 'directives end mark is expected');
+    throwError(state, 'directives end mark is expected')
   }
 
-  composeNode(state, state.lineIndent - 1, CONTEXT_BLOCK_OUT, false, true);
-  skipSeparationSpace(state, true, -1);
+  composeNode(state, state.lineIndent - 1, CONTEXT_BLOCK_OUT, false, true)
+  skipSeparationSpace(state, true, -1)
 
   if (state.checkLineBreaks &&
       PATTERN_NON_ASCII_LINE_BREAKS.test(state.input.slice(documentStart, state.position))) {
-    throwWarning(state, 'non-ASCII line breaks are interpreted as content');
+    throwWarning(state, 'non-ASCII line breaks are interpreted as content')
   }
 
-  state.documents.push(state.result);
+  state.documents.push(state.result)
 
   if (state.position === state.lineStart && testDocumentSeparator(state)) {
-
     if (state.input.charCodeAt(state.position) === 0x2E/* . */) {
-      state.position += 3;
-      skipSeparationSpace(state, true, -1);
+      state.position += 3
+      skipSeparationSpace(state, true, -1)
     }
-    return;
+    return
   }
 
   if (state.position < (state.length - 1)) {
-    throwError(state, 'end of the stream or a document separator is expected');
-  } else {
-    return;
+    throwError(state, 'end of the stream or a document separator is expected')
   }
 }
 
-
-function loadDocuments(input, options) {
-  input = String(input);
-  options = options || {};
+function loadDocuments (input, options) {
+  input = String(input)
+  options = options || {}
 
   if (input.length !== 0) {
-
     // Add tailing `\n` if not exists
     if (input.charCodeAt(input.length - 1) !== 0x0A/* LF */ &&
         input.charCodeAt(input.length - 1) !== 0x0D/* CR */) {
-      input += '\n';
+      input += '\n'
     }
 
     // Strip BOM
     if (input.charCodeAt(0) === 0xFEFF) {
-      input = input.slice(1);
+      input = input.slice(1)
     }
   }
 
-  var state = new State(input, options);
+  const state = new State(input, options)
 
-  var nullpos = input.indexOf('\0');
+  const nullpos = input.indexOf('\0')
 
   if (nullpos !== -1) {
-    state.position = nullpos;
-    throwError(state, 'null byte is not allowed in input');
+    state.position = nullpos
+    throwError(state, 'null byte is not allowed in input')
   }
 
   // Use 0 as string terminator. That significantly simplifies bounds check.
-  state.input += '\0';
+  state.input += '\0'
 
   while (state.input.charCodeAt(state.position) === 0x20/* Space */) {
-    state.lineIndent += 1;
-    state.position += 1;
+    state.lineIndent += 1
+    state.position += 1
   }
 
   while (state.position < (state.length - 1)) {
-    readDocument(state);
+    readDocument(state)
   }
 
-  return state.documents;
+  return state.documents
 }
 
-
-function loadAll(input, iterator, options) {
+function loadAll (input, iterator, options) {
   if (iterator !== null && typeof iterator === 'object' && typeof options === 'undefined') {
-    options = iterator;
-    iterator = null;
+    options = iterator
+    iterator = null
   }
 
-  var documents = loadDocuments(input, options);
+  const documents = loadDocuments(input, options)
 
   if (typeof iterator !== 'function') {
-    return documents;
+    return documents
   }
 
-  for (var index = 0, length = documents.length; index < length; index += 1) {
-    iterator(documents[index]);
+  for (let index = 0, length = documents.length; index < length; index += 1) {
+    iterator(documents[index])
   }
 }
 
-
-function load(input, options) {
-  var documents = loadDocuments(input, options);
+function load (input, options) {
+  const documents = loadDocuments(input, options)
 
   if (documents.length === 0) {
-    /*eslint-disable no-undefined*/
-    return undefined;
+    return undefined
   } else if (documents.length === 1) {
-    return documents[0];
+    return documents[0]
   }
-  throw new YAMLException('expected a single document in the stream, but found more');
+  throw new YAMLException('expected a single document in the stream, but found more')
 }
 
-
-module.exports.loadAll = loadAll;
-module.exports.load    = load;
+module.exports.loadAll = loadAll
+module.exports.load = load
 
 
 /***/ }),
@@ -40418,125 +34939,113 @@ module.exports.load    = load;
 "use strict";
 
 
-/*eslint-disable max-len*/
+const YAMLException = __nccwpck_require__(68179)
+const Type = __nccwpck_require__(6073)
 
-var YAMLException = __nccwpck_require__(68179);
-var Type          = __nccwpck_require__(6073);
-
-
-function compileList(schema, name) {
-  var result = [];
+function compileList (schema, name) {
+  const result = []
 
   schema[name].forEach(function (currentType) {
-    var newIndex = result.length;
+    let newIndex = result.length
 
     result.forEach(function (previousType, previousIndex) {
       if (previousType.tag === currentType.tag &&
           previousType.kind === currentType.kind &&
           previousType.multi === currentType.multi) {
-
-        newIndex = previousIndex;
+        newIndex = previousIndex
       }
-    });
+    })
 
-    result[newIndex] = currentType;
-  });
+    result[newIndex] = currentType
+  })
 
-  return result;
+  return result
 }
 
-
-function compileMap(/* lists... */) {
-  var result = {
-        scalar: {},
-        sequence: {},
-        mapping: {},
-        fallback: {},
-        multi: {
-          scalar: [],
-          sequence: [],
-          mapping: [],
-          fallback: []
-        }
-      }, index, length;
-
-  function collectType(type) {
+function compileMap (/* lists... */) {
+  const result = {
+    scalar: {},
+    sequence: {},
+    mapping: {},
+    fallback: {},
+    multi: {
+      scalar: [],
+      sequence: [],
+      mapping: [],
+      fallback: []
+    }
+  }
+  function collectType (type) {
     if (type.multi) {
-      result.multi[type.kind].push(type);
-      result.multi['fallback'].push(type);
+      result.multi[type.kind].push(type)
+      result.multi['fallback'].push(type)
     } else {
-      result[type.kind][type.tag] = result['fallback'][type.tag] = type;
+      result[type.kind][type.tag] = result['fallback'][type.tag] = type
     }
   }
 
-  for (index = 0, length = arguments.length; index < length; index += 1) {
-    arguments[index].forEach(collectType);
+  for (let index = 0, length = arguments.length; index < length; index += 1) {
+    arguments[index].forEach(collectType)
   }
-  return result;
+  return result
 }
 
-
-function Schema(definition) {
-  return this.extend(definition);
+function Schema (definition) {
+  return this.extend(definition)
 }
 
-
-Schema.prototype.extend = function extend(definition) {
-  var implicit = [];
-  var explicit = [];
+Schema.prototype.extend = function extend (definition) {
+  let implicit = []
+  let explicit = []
 
   if (definition instanceof Type) {
     // Schema.extend(type)
-    explicit.push(definition);
-
+    explicit.push(definition)
   } else if (Array.isArray(definition)) {
     // Schema.extend([ type1, type2, ... ])
-    explicit = explicit.concat(definition);
-
+    explicit = explicit.concat(definition)
   } else if (definition && (Array.isArray(definition.implicit) || Array.isArray(definition.explicit))) {
     // Schema.extend({ explicit: [ type1, type2, ... ], implicit: [ type1, type2, ... ] })
-    if (definition.implicit) implicit = implicit.concat(definition.implicit);
-    if (definition.explicit) explicit = explicit.concat(definition.explicit);
-
+    if (definition.implicit) implicit = implicit.concat(definition.implicit)
+    if (definition.explicit) explicit = explicit.concat(definition.explicit)
   } else {
     throw new YAMLException('Schema.extend argument should be a Type, [ Type ], ' +
-      'or a schema definition ({ implicit: [...], explicit: [...] })');
+      'or a schema definition ({ implicit: [...], explicit: [...] })')
   }
 
   implicit.forEach(function (type) {
     if (!(type instanceof Type)) {
-      throw new YAMLException('Specified list of YAML types (or a single Type object) contains a non-Type object.');
+      throw new YAMLException('Specified list of YAML types (or a single Type object) contains a non-Type object.')
     }
 
     if (type.loadKind && type.loadKind !== 'scalar') {
-      throw new YAMLException('There is a non-scalar type in the implicit list of a schema. Implicit resolving of such types is not supported.');
+      throw new YAMLException('There is a non-scalar type in the implicit list of a schema. Implicit resolving of such types is not supported.')
     }
 
     if (type.multi) {
-      throw new YAMLException('There is a multi type in the implicit list of a schema. Multi tags can only be listed as explicit.');
+      throw new YAMLException('There is a multi type in the implicit list of a schema. Multi tags can only be listed as explicit.')
     }
-  });
+  })
 
   explicit.forEach(function (type) {
     if (!(type instanceof Type)) {
-      throw new YAMLException('Specified list of YAML types (or a single Type object) contains a non-Type object.');
+      throw new YAMLException('Specified list of YAML types (or a single Type object) contains a non-Type object.')
     }
-  });
+  })
 
-  var result = Object.create(Schema.prototype);
+  const result = Object.create(Schema.prototype)
 
-  result.implicit = (this.implicit || []).concat(implicit);
-  result.explicit = (this.explicit || []).concat(explicit);
+  result.implicit = (this.implicit || []).concat(implicit)
+  result.explicit = (this.explicit || []).concat(explicit)
 
-  result.compiledImplicit = compileList(result, 'implicit');
-  result.compiledExplicit = compileList(result, 'explicit');
-  result.compiledTypeMap  = compileMap(result.compiledImplicit, result.compiledExplicit);
+  result.compiledImplicit = compileList(result, 'implicit')
+  result.compiledExplicit = compileList(result, 'explicit')
+  result.compiledTypeMap = compileMap(result.compiledImplicit, result.compiledExplicit)
 
-  return result;
-};
+  return result
+}
 
-
-module.exports = Schema;
+module.exports = Schema
 
 
 /***/ }),
@@ -40553,9 +35062,7 @@ module.exports = Schema;
 
 
 
-
-
-module.exports = __nccwpck_require__(1035);
+module.exports = __nccwpck_require__(1035)
 
 
 /***/ }),
@@ -40572,8 +35079,6 @@ module.exports = __nccwpck_require__(1035);
 
 
 
-
-
 module.exports = (__nccwpck_require__(12011).extend)({
   implicit: [
     __nccwpck_require__(99212),
@@ -40585,7 +35090,7 @@ module.exports = (__nccwpck_require__(12011).extend)({
     __nccwpck_require__(96860),
     __nccwpck_require__(79548)
   ]
-});
+})
 
 
 /***/ }),
@@ -40599,10 +35104,7 @@ module.exports = (__nccwpck_require__(12011).extend)({
 
 
 
-
-
-var Schema = __nccwpck_require__(21082);
-
+const Schema = __nccwpck_require__(21082)
 
 module.exports = new Schema({
   explicit: [
@@ -40610,7 +35112,7 @@ module.exports = new Schema({
     __nccwpck_require__(67283),
     __nccwpck_require__(86150)
   ]
-});
+})
 
 
 /***/ }),
@@ -40628,8 +35130,6 @@ module.exports = new Schema({
 
 
 
-
-
 module.exports = (__nccwpck_require__(28562).extend)({
   implicit: [
     __nccwpck_require__(20721),
@@ -40637,7 +35137,7 @@ module.exports = (__nccwpck_require__(28562).extend)({
     __nccwpck_require__(11615),
     __nccwpck_require__(42705)
   ]
-});
+})
 
 
 /***/ }),
@@ -40648,105 +35148,100 @@ module.exports = (__nccwpck_require__(28562).extend)({
 "use strict";
 
 
-
-var common = __nccwpck_require__(26829);
-
+const common = __nccwpck_require__(26829)
 
 // get snippet for a single line, respecting maxLength
-function getLine(buffer, lineStart, lineEnd, position, maxLineLength) {
-  var head = '';
-  var tail = '';
-  var maxHalfLength = Math.floor(maxLineLength / 2) - 1;
+function getLine (buffer, lineStart, lineEnd, position, maxLineLength) {
+  let head = ''
+  let tail = ''
+  const maxHalfLength = Math.floor(maxLineLength / 2) - 1
 
   if (position - lineStart > maxHalfLength) {
-    head = ' ... ';
-    lineStart = position - maxHalfLength + head.length;
+    head = ' ... '
+    lineStart = position - maxHalfLength + head.length
   }
 
   if (lineEnd - position > maxHalfLength) {
-    tail = ' ...';
-    lineEnd = position + maxHalfLength - tail.length;
+    tail = ' ...'
+    lineEnd = position + maxHalfLength - tail.length
   }
 
   return {
     str: head + buffer.slice(lineStart, lineEnd).replace(/\t/g, '→') + tail,
     pos: position - lineStart + head.length // relative position
-  };
+  }
 }
 
-
-function padStart(string, max) {
-  return common.repeat(' ', max - string.length) + string;
+function padStart (string, max) {
+  return common.repeat(' ', max - string.length) + string
 }
 
+function makeSnippet (mark, options) {
+  options = Object.create(options || null)
 
-function makeSnippet(mark, options) {
-  options = Object.create(options || null);
+  if (!mark.buffer) return null
 
-  if (!mark.buffer) return null;
+  if (!options.maxLength) options.maxLength = 79
+  if (typeof options.indent !== 'number') options.indent = 1
+  if (typeof options.linesBefore !== 'number') options.linesBefore = 3
+  if (typeof options.linesAfter !== 'number') options.linesAfter = 2
 
-  if (!options.maxLength) options.maxLength = 79;
-  if (typeof options.indent      !== 'number') options.indent      = 1;
-  if (typeof options.linesBefore !== 'number') options.linesBefore = 3;
-  if (typeof options.linesAfter  !== 'number') options.linesAfter  = 2;
-
-  var re = /\r?\n|\r|\0/g;
-  var lineStarts = [ 0 ];
-  var lineEnds = [];
-  var match;
-  var foundLineNo = -1;
+  const re = /\r?\n|\r|\0/g
+  const lineStarts = [0]
+  const lineEnds = []
+  let match
+  let foundLineNo = -1
 
   while ((match = re.exec(mark.buffer))) {
-    lineEnds.push(match.index);
-    lineStarts.push(match.index + match[0].length);
+    lineEnds.push(match.index)
+    lineStarts.push(match.index + match[0].length)
 
     if (mark.position <= match.index && foundLineNo < 0) {
-      foundLineNo = lineStarts.length - 2;
+      foundLineNo = lineStarts.length - 2
     }
   }
 
-  if (foundLineNo < 0) foundLineNo = lineStarts.length - 1;
+  if (foundLineNo < 0) foundLineNo = lineStarts.length - 1
 
-  var result = '', i, line;
-  var lineNoLength = Math.min(mark.line + options.linesAfter, lineEnds.length).toString().length;
-  var maxLineLength = options.maxLength - (options.indent + lineNoLength + 3);
+  let result = ''
+  const lineNoLength = Math.min(mark.line + options.linesAfter, lineEnds.length).toString().length
+  const maxLineLength = options.maxLength - (options.indent + lineNoLength + 3)
 
-  for (i = 1; i <= options.linesBefore; i++) {
-    if (foundLineNo - i < 0) break;
-    line = getLine(
+  for (let i = 1; i <= options.linesBefore; i++) {
+    if (foundLineNo - i < 0) break
+    const line = getLine(
       mark.buffer,
       lineStarts[foundLineNo - i],
       lineEnds[foundLineNo - i],
       mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo - i]),
       maxLineLength
-    );
+    )
     result = common.repeat(' ', options.indent) + padStart((mark.line - i + 1).toString(), lineNoLength) +
-      ' | ' + line.str + '\n' + result;
+      ' | ' + line.str + '\n' + result
   }
 
-  line = getLine(mark.buffer, lineStarts[foundLineNo], lineEnds[foundLineNo], mark.position, maxLineLength);
+  const line = getLine(mark.buffer, lineStarts[foundLineNo], lineEnds[foundLineNo], mark.position, maxLineLength)
   result += common.repeat(' ', options.indent) + padStart((mark.line + 1).toString(), lineNoLength) +
-    ' | ' + line.str + '\n';
-  result += common.repeat('-', options.indent + lineNoLength + 3 + line.pos) + '^' + '\n';
+    ' | ' + line.str + '\n'
+  result += common.repeat('-', options.indent + lineNoLength + 3 + line.pos) + '^' + '\n'
 
-  for (i = 1; i <= options.linesAfter; i++) {
-    if (foundLineNo + i >= lineEnds.length) break;
-    line = getLine(
+  for (let i = 1; i <= options.linesAfter; i++) {
+    if (foundLineNo + i >= lineEnds.length) break
+    const line = getLine(
       mark.buffer,
       lineStarts[foundLineNo + i],
       lineEnds[foundLineNo + i],
       mark.position - (lineStarts[foundLineNo] - lineStarts[foundLineNo + i]),
       maxLineLength
-    );
+    )
     result += common.repeat(' ', options.indent) + padStart((mark.line + i + 1).toString(), lineNoLength) +
-      ' | ' + line.str + '\n';
+      ' | ' + line.str + '\n'
   }
 
-  return result.replace(/\n$/, '');
+  return result.replace(/\n$/, '')
 }
 
-
-module.exports = makeSnippet;
+module.exports = makeSnippet
 
 
 /***/ }),
@@ -40757,9 +35252,9 @@ module.exports = makeSnippet;
 "use strict";
 
 
-var YAMLException = __nccwpck_require__(68179);
+const YAMLException = __nccwpck_require__(68179)
 
-var TYPE_CONSTRUCTOR_OPTIONS = [
+const TYPE_CONSTRUCTOR_OPTIONS = [
   'kind',
   'multi',
   'resolve',
@@ -40770,57 +35265,57 @@ var TYPE_CONSTRUCTOR_OPTIONS = [
   'representName',
   'defaultStyle',
   'styleAliases'
-];
+]
 
-var YAML_NODE_KINDS = [
+const YAML_NODE_KINDS = [
   'scalar',
   'sequence',
   'mapping'
-];
+]
 
-function compileStyleAliases(map) {
-  var result = {};
+function compileStyleAliases (map) {
+  const result = {}
 
   if (map !== null) {
     Object.keys(map).forEach(function (style) {
       map[style].forEach(function (alias) {
-        result[String(alias)] = style;
-      });
-    });
+        result[String(alias)] = style
+      })
+    })
   }
 
-  return result;
+  return result
 }
 
-function Type(tag, options) {
-  options = options || {};
+function Type (tag, options) {
+  options = options || {}
 
   Object.keys(options).forEach(function (name) {
     if (TYPE_CONSTRUCTOR_OPTIONS.indexOf(name) === -1) {
-      throw new YAMLException('Unknown option "' + name + '" is met in definition of "' + tag + '" YAML type.');
+      throw new YAMLException('Unknown option "' + name + '" is met in definition of "' + tag + '" YAML type.')
     }
-  });
+  })
 
   // TODO: Add tag format check.
-  this.options       = options; // keep original options in case user wants to extend this type later
-  this.tag           = tag;
-  this.kind          = options['kind']          || null;
-  this.resolve       = options['resolve']       || function () { return true; };
-  this.construct     = options['construct']     || function (data) { return data; };
-  this.instanceOf    = options['instanceOf']    || null;
-  this.predicate     = options['predicate']     || null;
-  this.represent     = options['represent']     || null;
-  this.representName = options['representName'] || null;
-  this.defaultStyle  = options['defaultStyle']  || null;
-  this.multi         = options['multi']         || false;
-  this.styleAliases  = compileStyleAliases(options['styleAliases'] || null);
+  this.options = options // keep original options in case user wants to extend this type later
+  this.tag = tag
+  this.kind = options['kind'] || null
+  this.resolve = options['resolve'] || function () { return true }
+  this.construct = options['construct'] || function (data) { return data }
+  this.instanceOf = options['instanceOf'] || null
+  this.predicate = options['predicate'] || null
+  this.represent = options['represent'] || null
+  this.representName = options['representName'] || null
+  this.defaultStyle = options['defaultStyle'] || null
+  this.multi = options['multi'] || false
+  this.styleAliases = compileStyleAliases(options['styleAliases'] || null)
 
   if (YAML_NODE_KINDS.indexOf(this.kind) === -1) {
-    throw new YAMLException('Unknown kind "' + this.kind + '" is specified for "' + tag + '" YAML type.');
+    throw new YAMLException('Unknown kind "' + this.kind + '" is specified for "' + tag + '" YAML type.')
   }
 }
 
-module.exports = Type;
+module.exports = Type
 
 
 /***/ }),
@@ -40831,120 +35326,117 @@ module.exports = Type;
 "use strict";
 
 
-/*eslint-disable no-bitwise*/
-
-
-var Type = __nccwpck_require__(6073);
-
+const Type = __nccwpck_require__(6073)
 
 // [ 64, 65, 66 ] -> [ padding, CR, LF ]
-var BASE64_MAP = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r';
+const BASE64_MAP = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r'
 
+function resolveYamlBinary (data) {
+  if (data === null) return false
 
-function resolveYamlBinary(data) {
-  if (data === null) return false;
-
-  var code, idx, bitlen = 0, max = data.length, map = BASE64_MAP;
+  let bitlen = 0
+  const max = data.length
+  const map = BASE64_MAP
 
   // Convert one by one.
-  for (idx = 0; idx < max; idx++) {
-    code = map.indexOf(data.charAt(idx));
+  for (let idx = 0; idx < max; idx++) {
+    const code = map.indexOf(data.charAt(idx))
 
     // Skip CR/LF
-    if (code > 64) continue;
+    if (code > 64) continue
 
     // Fail on illegal characters
-    if (code < 0) return false;
+    if (code < 0) return false
 
-    bitlen += 6;
+    bitlen += 6
   }
 
   // If there are any bits left, source was corrupted
-  return (bitlen % 8) === 0;
+  return (bitlen % 8) === 0
 }
 
-function constructYamlBinary(data) {
-  var idx, tailbits,
-      input = data.replace(/[\r\n=]/g, ''), // remove CR/LF & padding to simplify scan
-      max = input.length,
-      map = BASE64_MAP,
-      bits = 0,
-      result = [];
+function constructYamlBinary (data) {
+  const input = data.replace(/[\r\n=]/g, '') // remove CR/LF & padding to simplify scan
+  const max = input.length
+  const map = BASE64_MAP
+  let bits = 0
+  const result = []
 
   // Collect by 6*4 bits (3 bytes)
 
-  for (idx = 0; idx < max; idx++) {
+  for (let idx = 0; idx < max; idx++) {
     if ((idx % 4 === 0) && idx) {
-      result.push((bits >> 16) & 0xFF);
-      result.push((bits >> 8) & 0xFF);
-      result.push(bits & 0xFF);
+      result.push((bits >> 16) & 0xFF)
+      result.push((bits >> 8) & 0xFF)
+      result.push(bits & 0xFF)
     }
 
-    bits = (bits << 6) | map.indexOf(input.charAt(idx));
+    bits = (bits << 6) | map.indexOf(input.charAt(idx))
   }
 
   // Dump tail
 
-  tailbits = (max % 4) * 6;
+  const tailbits = (max % 4) * 6
 
   if (tailbits === 0) {
-    result.push((bits >> 16) & 0xFF);
-    result.push((bits >> 8) & 0xFF);
-    result.push(bits & 0xFF);
+    result.push((bits >> 16) & 0xFF)
+    result.push((bits >> 8) & 0xFF)
+    result.push(bits & 0xFF)
   } else if (tailbits === 18) {
-    result.push((bits >> 10) & 0xFF);
-    result.push((bits >> 2) & 0xFF);
+    result.push((bits >> 10) & 0xFF)
+    result.push((bits >> 2) & 0xFF)
   } else if (tailbits === 12) {
-    result.push((bits >> 4) & 0xFF);
+    result.push((bits >> 4) & 0xFF)
   }
 
-  return new Uint8Array(result);
+  return new Uint8Array(result)
 }
 
-function representYamlBinary(object /*, style*/) {
-  var result = '', bits = 0, idx, tail,
-      max = object.length,
-      map = BASE64_MAP;
+function representYamlBinary (object /*, style */) {
+  let result = ''
+  let bits = 0
+  const max = object.length
+  const map = BASE64_MAP
 
   // Convert every three bytes to 4 ASCII characters.
 
-  for (idx = 0; idx < max; idx++) {
+  for (let idx = 0; idx < max; idx++) {
     if ((idx % 3 === 0) && idx) {
-      result += map[(bits >> 18) & 0x3F];
-      result += map[(bits >> 12) & 0x3F];
-      result += map[(bits >> 6) & 0x3F];
-      result += map[bits & 0x3F];
+      result += map[(bits >> 18) & 0x3F]
+      result += map[(bits >> 12) & 0x3F]
+      result += map[(bits >> 6) & 0x3F]
+      result += map[bits & 0x3F]
     }
 
-    bits = (bits << 8) + object[idx];
+    bits = (bits << 8) + object[idx]
   }
 
   // Dump tail
 
-  tail = max % 3;
+  const tail = max % 3
 
   if (tail === 0) {
-    result += map[(bits >> 18) & 0x3F];
-    result += map[(bits >> 12) & 0x3F];
-    result += map[(bits >> 6) & 0x3F];
-    result += map[bits & 0x3F];
+    result += map[(bits >> 18) & 0x3F]
+    result += map[(bits >> 12) & 0x3F]
+    result += map[(bits >> 6) & 0x3F]
+    result += map[bits & 0x3F]
   } else if (tail === 2) {
-    result += map[(bits >> 10) & 0x3F];
-    result += map[(bits >> 4) & 0x3F];
-    result += map[(bits << 2) & 0x3F];
-    result += map[64];
+    result += map[(bits >> 10) & 0x3F]
+    result += map[(bits >> 4) & 0x3F]
+    result += map[(bits << 2) & 0x3F]
+    result += map[64]
   } else if (tail === 1) {
-    result += map[(bits >> 2) & 0x3F];
-    result += map[(bits << 4) & 0x3F];
-    result += map[64];
-    result += map[64];
+    result += map[(bits >> 2) & 0x3F]
+    result += map[(bits << 4) & 0x3F]
+    result += map[64]
+    result += map[64]
   }
 
-  return result;
+  return result
 }
 
-function isBinary(obj) {
-  return Object.prototype.toString.call(obj) ===  '[object Uint8Array]';
+function isBinary (obj) {
+  return Object.prototype.toString.call(obj) === '[object Uint8Array]'
 }
 
 module.exports = new Type('tag:yaml.org,2002:binary', {
@@ -40953,7 +35445,7 @@ module.exports = new Type('tag:yaml.org,2002:binary', {
   construct: constructYamlBinary,
   predicate: isBinary,
   represent: representYamlBinary
-});
+})
 
 
 /***/ }),
@@ -40964,25 +35456,25 @@ module.exports = new Type('tag:yaml.org,2002:binary', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-function resolveYamlBoolean(data) {
-  if (data === null) return false;
+function resolveYamlBoolean (data) {
+  if (data === null) return false
 
-  var max = data.length;
+  const max = data.length
 
   return (max === 4 && (data === 'true' || data === 'True' || data === 'TRUE')) ||
-         (max === 5 && (data === 'false' || data === 'False' || data === 'FALSE'));
+         (max === 5 && (data === 'false' || data === 'False' || data === 'FALSE'))
 }
 
-function constructYamlBoolean(data) {
+function constructYamlBoolean (data) {
   return data === 'true' ||
          data === 'True' ||
-         data === 'TRUE';
+         data === 'TRUE'
 }
 
-function isBoolean(object) {
-  return Object.prototype.toString.call(object) === '[object Boolean]';
+function isBoolean (object) {
+  return Object.prototype.toString.call(object) === '[object Boolean]'
 }
 
 module.exports = new Type('tag:yaml.org,2002:bool', {
@@ -40991,12 +35483,12 @@ module.exports = new Type('tag:yaml.org,2002:bool', {
   construct: constructYamlBoolean,
   predicate: isBoolean,
   represent: {
-    lowercase: function (object) { return object ? 'true' : 'false'; },
-    uppercase: function (object) { return object ? 'TRUE' : 'FALSE'; },
-    camelcase: function (object) { return object ? 'True' : 'False'; }
+    lowercase: function (object) { return object ? 'true' : 'false' },
+    uppercase: function (object) { return object ? 'TRUE' : 'FALSE' },
+    camelcase: function (object) { return object ? 'True' : 'False' }
   },
   defaultStyle: 'lowercase'
-});
+})
 
 
 /***/ }),
@@ -41007,91 +35499,93 @@ module.exports = new Type('tag:yaml.org,2002:bool', {
 "use strict";
 
 
-var common = __nccwpck_require__(26829);
-var Type   = __nccwpck_require__(6073);
+const common = __nccwpck_require__(26829)
+const Type = __nccwpck_require__(6073)
 
-var YAML_FLOAT_PATTERN = new RegExp(
+const YAML_FLOAT_PATTERN = new RegExp(
   // 2.5e4, 2.5 and integers
-  '^(?:[-+]?(?:[0-9][0-9_]*)(?:\\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?' +
+  '^(?:[-+]?(?:[0-9]+)(?:\\.[0-9]*)?(?:[eE][-+]?[0-9]+)?' +
   // .2e4, .2
   // special case, seems not from spec
-  '|\\.[0-9_]+(?:[eE][-+]?[0-9]+)?' +
+  '|\\.[0-9]+(?:[eE][-+]?[0-9]+)?' +
   // .inf
   '|[-+]?\\.(?:inf|Inf|INF)' +
   // .nan
-  '|\\.(?:nan|NaN|NAN))$');
+  '|\\.(?:nan|NaN|NAN))$')
 
-function resolveYamlFloat(data) {
-  if (data === null) return false;
+const YAML_FLOAT_SPECIAL_PATTERN = new RegExp(
+  '^(?:' +
+  // .inf
+  '[-+]?\\.(?:inf|Inf|INF)' +
+  // .nan
+  '|\\.(?:nan|NaN|NAN))$')
 
-  if (!YAML_FLOAT_PATTERN.test(data) ||
-      // Quick hack to not allow integers end with `_`
-      // Probably should update regexp & check speed
-      data[data.length - 1] === '_') {
-    return false;
+function resolveYamlFloat (data) {
+  if (data === null) return false
+
+  if (!YAML_FLOAT_PATTERN.test(data)) {
+    return false
   }
 
-  return true;
+  if (isFinite(parseFloat(data, 10))) {
+    return true
+  }
+
+  return YAML_FLOAT_SPECIAL_PATTERN.test(data)
 }
 
-function constructYamlFloat(data) {
-  var value, sign;
-
-  value  = data.replace(/_/g, '').toLowerCase();
-  sign   = value[0] === '-' ? -1 : 1;
+function constructYamlFloat (data) {
+  let value = data.toLowerCase()
+  const sign = value[0] === '-' ? -1 : 1
 
   if ('+-'.indexOf(value[0]) >= 0) {
-    value = value.slice(1);
+    value = value.slice(1)
   }
 
   if (value === '.inf') {
-    return (sign === 1) ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-
+    return (sign === 1) ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY
   } else if (value === '.nan') {
-    return NaN;
+    return NaN
   }
-  return sign * parseFloat(value, 10);
+  return sign * parseFloat(value, 10)
 }
 
+const SCIENTIFIC_WITHOUT_DOT = /^[-+]?[0-9]+e/
 
-var SCIENTIFIC_WITHOUT_DOT = /^[-+]?[0-9]+e/;
-
-function representYamlFloat(object, style) {
-  var res;
-
+function representYamlFloat (object, style) {
   if (isNaN(object)) {
     switch (style) {
-      case 'lowercase': return '.nan';
-      case 'uppercase': return '.NAN';
-      case 'camelcase': return '.NaN';
+      case 'lowercase': return '.nan'
+      case 'uppercase': return '.NAN'
+      case 'camelcase': return '.NaN'
     }
   } else if (Number.POSITIVE_INFINITY === object) {
     switch (style) {
-      case 'lowercase': return '.inf';
-      case 'uppercase': return '.INF';
-      case 'camelcase': return '.Inf';
+      case 'lowercase': return '.inf'
+      case 'uppercase': return '.INF'
+      case 'camelcase': return '.Inf'
     }
   } else if (Number.NEGATIVE_INFINITY === object) {
     switch (style) {
-      case 'lowercase': return '-.inf';
-      case 'uppercase': return '-.INF';
-      case 'camelcase': return '-.Inf';
+      case 'lowercase': return '-.inf'
+      case 'uppercase': return '-.INF'
+      case 'camelcase': return '-.Inf'
     }
   } else if (common.isNegativeZero(object)) {
-    return '-0.0';
+    return '-0.0'
   }
 
-  res = object.toString(10);
+  const res = object.toString(10)
 
   // JS stringifier can build scientific format without dots: 5e-100,
   // while YAML requres dot: 5.e-100. Fix it with simple hack
 
-  return SCIENTIFIC_WITHOUT_DOT.test(res) ? res.replace('e', '.e') : res;
+  return SCIENTIFIC_WITHOUT_DOT.test(res) ? res.replace('e', '.e') : res
 }
 
-function isFloat(object) {
+function isFloat (object) {
   return (Object.prototype.toString.call(object) === '[object Number]') &&
-         (object % 1 !== 0 || common.isNegativeZero(object));
+         (object % 1 !== 0 || common.isNegativeZero(object))
 }
 
 module.exports = new Type('tag:yaml.org,2002:float', {
@@ -41101,7 +35595,7 @@ module.exports = new Type('tag:yaml.org,2002:float', {
   predicate: isFloat,
   represent: representYamlFloat,
   defaultStyle: 'lowercase'
-});
+})
 
 
 /***/ }),
@@ -41112,138 +35606,125 @@ module.exports = new Type('tag:yaml.org,2002:float', {
 "use strict";
 
 
-var common = __nccwpck_require__(26829);
-var Type   = __nccwpck_require__(6073);
+const common = __nccwpck_require__(26829)
+const Type = __nccwpck_require__(6073)
 
-function isHexCode(c) {
-  return ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */)) ||
-         ((0x41/* A */ <= c) && (c <= 0x46/* F */)) ||
-         ((0x61/* a */ <= c) && (c <= 0x66/* f */));
+function isHexCode (c) {
+  return ((c >= 0x30/* 0 */) && (c <= 0x39/* 9 */)) ||
+         ((c >= 0x41/* A */) && (c <= 0x46/* F */)) ||
+         ((c >= 0x61/* a */) && (c <= 0x66/* f */))
 }
 
-function isOctCode(c) {
-  return ((0x30/* 0 */ <= c) && (c <= 0x37/* 7 */));
+function isOctCode (c) {
+  return ((c >= 0x30/* 0 */) && (c <= 0x37/* 7 */))
 }
 
-function isDecCode(c) {
-  return ((0x30/* 0 */ <= c) && (c <= 0x39/* 9 */));
+function isDecCode (c) {
+  return ((c >= 0x30/* 0 */) && (c <= 0x39/* 9 */))
 }
 
-function resolveYamlInteger(data) {
-  if (data === null) return false;
+function resolveYamlInteger (data) {
+  if (data === null) return false
 
-  var max = data.length,
-      index = 0,
-      hasDigits = false,
-      ch;
+  const max = data.length
+  let index = 0
+  let hasDigits = false
 
-  if (!max) return false;
+  if (!max) return false
 
-  ch = data[index];
+  let ch = data[index]
 
   // sign
   if (ch === '-' || ch === '+') {
-    ch = data[++index];
+    ch = data[++index]
   }
 
   if (ch === '0') {
     // 0
-    if (index + 1 === max) return true;
-    ch = data[++index];
+    if (index + 1 === max) return true
+    ch = data[++index]
 
     // base 2, base 8, base 16
 
     if (ch === 'b') {
       // base 2
-      index++;
+      index++
 
       for (; index < max; index++) {
-        ch = data[index];
-        if (ch === '_') continue;
-        if (ch !== '0' && ch !== '1') return false;
-        hasDigits = true;
+        ch = data[index]
+        if (ch !== '0' && ch !== '1') return false
+        hasDigits = true
       }
-      return hasDigits && ch !== '_';
+      return hasDigits && isFinite(parseYamlInteger(data))
     }
-
 
     if (ch === 'x') {
       // base 16
-      index++;
+      index++
 
       for (; index < max; index++) {
-        ch = data[index];
-        if (ch === '_') continue;
-        if (!isHexCode(data.charCodeAt(index))) return false;
-        hasDigits = true;
+        if (!isHexCode(data.charCodeAt(index))) return false
+        hasDigits = true
       }
-      return hasDigits && ch !== '_';
+      return hasDigits && isFinite(parseYamlInteger(data))
     }
-
 
     if (ch === 'o') {
       // base 8
-      index++;
+      index++
 
       for (; index < max; index++) {
-        ch = data[index];
-        if (ch === '_') continue;
-        if (!isOctCode(data.charCodeAt(index))) return false;
-        hasDigits = true;
+        if (!isOctCode(data.charCodeAt(index))) return false
+        hasDigits = true
       }
-      return hasDigits && ch !== '_';
+      return hasDigits && isFinite(parseYamlInteger(data))
     }
   }
 
   // base 10 (except 0)
 
-  // value should not start with `_`;
-  if (ch === '_') return false;
-
   for (; index < max; index++) {
-    ch = data[index];
-    if (ch === '_') continue;
     if (!isDecCode(data.charCodeAt(index))) {
-      return false;
+      return false
     }
-    hasDigits = true;
+    hasDigits = true
   }
 
-  // Should have digits and should not end with `_`
-  if (!hasDigits || ch === '_') return false;
+  if (!hasDigits) return false
 
-  return true;
+  return isFinite(parseYamlInteger(data))
 }
 
-function constructYamlInteger(data) {
-  var value = data, sign = 1, ch;
+function parseYamlInteger (data) {
+  let value = data
+  let sign = 1
 
-  if (value.indexOf('_') !== -1) {
-    value = value.replace(/_/g, '');
-  }
-
-  ch = value[0];
+  let ch = value[0]
 
   if (ch === '-' || ch === '+') {
-    if (ch === '-') sign = -1;
-    value = value.slice(1);
-    ch = value[0];
+    if (ch === '-') sign = -1
+    value = value.slice(1)
+    ch = value[0]
   }
 
-  if (value === '0') return 0;
+  if (value === '0') return 0
 
   if (ch === '0') {
-    if (value[1] === 'b') return sign * parseInt(value.slice(2), 2);
-    if (value[1] === 'x') return sign * parseInt(value.slice(2), 16);
-    if (value[1] === 'o') return sign * parseInt(value.slice(2), 8);
+    if (value[1] === 'b') return sign * parseInt(value.slice(2), 2)
+    if (value[1] === 'x') return sign * parseInt(value.slice(2), 16)
+    if (value[1] === 'o') return sign * parseInt(value.slice(2), 8)
   }
 
-  return sign * parseInt(value, 10);
+  return sign * parseInt(value, 10)
 }
 
-function isInteger(object) {
+function constructYamlInteger (data) {
+  return parseYamlInteger(data)
+}
+
+function isInteger (object) {
   return (Object.prototype.toString.call(object)) === '[object Number]' &&
-         (object % 1 === 0 && !common.isNegativeZero(object));
+         (object % 1 === 0 && !common.isNegativeZero(object))
 }
 
 module.exports = new Type('tag:yaml.org,2002:int', {
@@ -41252,20 +35733,19 @@ module.exports = new Type('tag:yaml.org,2002:int', {
   construct: constructYamlInteger,
   predicate: isInteger,
   represent: {
-    binary:      function (obj) { return obj >= 0 ? '0b' + obj.toString(2) : '-0b' + obj.toString(2).slice(1); },
-    octal:       function (obj) { return obj >= 0 ? '0o'  + obj.toString(8) : '-0o'  + obj.toString(8).slice(1); },
-    decimal:     function (obj) { return obj.toString(10); },
-    /* eslint-disable max-len */
-    hexadecimal: function (obj) { return obj >= 0 ? '0x' + obj.toString(16).toUpperCase() :  '-0x' + obj.toString(16).toUpperCase().slice(1); }
+    binary: function (obj) { return obj >= 0 ? '0b' + obj.toString(2) : '-0b' + obj.toString(2).slice(1) },
+    octal: function (obj) { return obj >= 0 ? '0o' + obj.toString(8) : '-0o' + obj.toString(8).slice(1) },
+    decimal: function (obj) { return obj.toString(10) },
+    hexadecimal: function (obj) { return obj >= 0 ? '0x' + obj.toString(16).toUpperCase() : '-0x' + obj.toString(16).toUpperCase().slice(1) }
   },
   defaultStyle: 'decimal',
   styleAliases: {
-    binary:      [ 2,  'bin' ],
-    octal:       [ 8,  'oct' ],
-    decimal:     [ 10, 'dec' ],
-    hexadecimal: [ 16, 'hex' ]
+    binary: [2, 'bin'],
+    octal: [8, 'oct'],
+    decimal: [10, 'dec'],
+    hexadecimal: [16, 'hex']
   }
-});
+})
 
 
 /***/ }),
@@ -41276,12 +35756,12 @@ module.exports = new Type('tag:yaml.org,2002:int', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
 module.exports = new Type('tag:yaml.org,2002:map', {
   kind: 'mapping',
-  construct: function (data) { return data !== null ? data : {}; }
-});
+  construct: function (data) { return data !== null ? data : {} }
+})
 
 
 /***/ }),
@@ -41292,16 +35772,16 @@ module.exports = new Type('tag:yaml.org,2002:map', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-function resolveYamlMerge(data) {
-  return data === '<<' || data === null;
+function resolveYamlMerge (data) {
+  return data === '<<' || data === null
 }
 
 module.exports = new Type('tag:yaml.org,2002:merge', {
   kind: 'scalar',
   resolve: resolveYamlMerge
-});
+})
 
 
 /***/ }),
@@ -41312,23 +35792,23 @@ module.exports = new Type('tag:yaml.org,2002:merge', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-function resolveYamlNull(data) {
-  if (data === null) return true;
+function resolveYamlNull (data) {
+  if (data === null) return true
 
-  var max = data.length;
+  const max = data.length
 
   return (max === 1 && data === '~') ||
-         (max === 4 && (data === 'null' || data === 'Null' || data === 'NULL'));
+         (max === 4 && (data === 'null' || data === 'Null' || data === 'NULL'))
 }
 
-function constructYamlNull() {
-  return null;
+function constructYamlNull () {
+  return null
 }
 
-function isNull(object) {
-  return object === null;
+function isNull (object) {
+  return object === null
 }
 
 module.exports = new Type('tag:yaml.org,2002:null', {
@@ -41337,14 +35817,14 @@ module.exports = new Type('tag:yaml.org,2002:null', {
   construct: constructYamlNull,
   predicate: isNull,
   represent: {
-    canonical: function () { return '~';    },
-    lowercase: function () { return 'null'; },
-    uppercase: function () { return 'NULL'; },
-    camelcase: function () { return 'Null'; },
-    empty:     function () { return '';     }
+    canonical: function () { return '~' },
+    lowercase: function () { return 'null' },
+    uppercase: function () { return 'NULL' },
+    camelcase: function () { return 'Null' },
+    empty: function () { return '' }
   },
   defaultStyle: 'lowercase'
-});
+})
 
 
 /***/ }),
@@ -41355,48 +35835,49 @@ module.exports = new Type('tag:yaml.org,2002:null', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
-var _toString       = Object.prototype.toString;
+const _hasOwnProperty = Object.prototype.hasOwnProperty
+const _toString = Object.prototype.toString
 
-function resolveYamlOmap(data) {
-  if (data === null) return true;
+function resolveYamlOmap (data) {
+  if (data === null) return true
 
-  var objectKeys = [], index, length, pair, pairKey, pairHasKey,
-      object = data;
+  const objectKeys = {}
+  const object = data
 
-  for (index = 0, length = object.length; index < length; index += 1) {
-    pair = object[index];
-    pairHasKey = false;
+  for (let index = 0, length = object.length; index < length; index += 1) {
+    const pair = object[index]
+    let pairHasKey = false
 
-    if (_toString.call(pair) !== '[object Object]') return false;
+    if (_toString.call(pair) !== '[object Object]') return false
 
+    let pairKey
     for (pairKey in pair) {
       if (_hasOwnProperty.call(pair, pairKey)) {
-        if (!pairHasKey) pairHasKey = true;
-        else return false;
+        if (!pairHasKey) pairHasKey = true
+        else return false
       }
     }
 
-    if (!pairHasKey) return false;
+    if (!pairHasKey) return false
 
-    if (objectKeys.indexOf(pairKey) === -1) objectKeys.push(pairKey);
-    else return false;
+    if (_hasOwnProperty.call(objectKeys, pairKey)) return false
+    Object.defineProperty(objectKeys, pairKey, { value: true })
   }
 
-  return true;
+  return true
 }
 
-function constructYamlOmap(data) {
-  return data !== null ? data : [];
+function constructYamlOmap (data) {
+  return data !== null ? data : []
 }
 
 module.exports = new Type('tag:yaml.org,2002:omap', {
   kind: 'sequence',
   resolve: resolveYamlOmap,
   construct: constructYamlOmap
-});
+})
 
 
 /***/ }),
@@ -41407,57 +35888,54 @@ module.exports = new Type('tag:yaml.org,2002:omap', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-var _toString = Object.prototype.toString;
+const _toString = Object.prototype.toString
 
-function resolveYamlPairs(data) {
-  if (data === null) return true;
+function resolveYamlPairs (data) {
+  if (data === null) return true
 
-  var index, length, pair, keys, result,
-      object = data;
+  const object = data
 
-  result = new Array(object.length);
+  const result = new Array(object.length)
 
-  for (index = 0, length = object.length; index < length; index += 1) {
-    pair = object[index];
+  for (let index = 0, length = object.length; index < length; index += 1) {
+    const pair = object[index]
 
-    if (_toString.call(pair) !== '[object Object]') return false;
+    if (_toString.call(pair) !== '[object Object]') return false
 
-    keys = Object.keys(pair);
+    const keys = Object.keys(pair)
 
-    if (keys.length !== 1) return false;
+    if (keys.length !== 1) return false
 
-    result[index] = [ keys[0], pair[keys[0]] ];
+    result[index] = [keys[0], pair[keys[0]]]
   }
 
-  return true;
+  return true
 }
 
-function constructYamlPairs(data) {
-  if (data === null) return [];
+function constructYamlPairs (data) {
+  if (data === null) return []
 
-  var index, length, pair, keys, result,
-      object = data;
+  const object = data
+  const result = new Array(object.length)
 
-  result = new Array(object.length);
+  for (let index = 0, length = object.length; index < length; index += 1) {
+    const pair = object[index]
 
-  for (index = 0, length = object.length; index < length; index += 1) {
-    pair = object[index];
+    const keys = Object.keys(pair)
 
-    keys = Object.keys(pair);
-
-    result[index] = [ keys[0], pair[keys[0]] ];
+    result[index] = [keys[0], pair[keys[0]]]
   }
 
-  return result;
+  return result
 }
 
 module.exports = new Type('tag:yaml.org,2002:pairs', {
   kind: 'sequence',
   resolve: resolveYamlPairs,
   construct: constructYamlPairs
-});
+})
 
 
 /***/ }),
@@ -41468,12 +35946,12 @@ module.exports = new Type('tag:yaml.org,2002:pairs', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
 module.exports = new Type('tag:yaml.org,2002:seq', {
   kind: 'sequence',
-  construct: function (data) { return data !== null ? data : []; }
-});
+  construct: function (data) { return data !== null ? data : [] }
+})
 
 
 /***/ }),
@@ -41484,33 +35962,33 @@ module.exports = new Type('tag:yaml.org,2002:seq', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-var _hasOwnProperty = Object.prototype.hasOwnProperty;
+const _hasOwnProperty = Object.prototype.hasOwnProperty
 
-function resolveYamlSet(data) {
-  if (data === null) return true;
+function resolveYamlSet (data) {
+  if (data === null) return true
 
-  var key, object = data;
+  const object = data
 
-  for (key in object) {
+  for (const key in object) {
     if (_hasOwnProperty.call(object, key)) {
-      if (object[key] !== null) return false;
+      if (object[key] !== null) return false
     }
   }
 
-  return true;
+  return true
 }
 
-function constructYamlSet(data) {
-  return data !== null ? data : {};
+function constructYamlSet (data) {
+  return data !== null ? data : {}
 }
 
 module.exports = new Type('tag:yaml.org,2002:set', {
   kind: 'mapping',
   resolve: resolveYamlSet,
   construct: constructYamlSet
-});
+})
 
 
 /***/ }),
@@ -41521,12 +35999,12 @@ module.exports = new Type('tag:yaml.org,2002:set', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
 module.exports = new Type('tag:yaml.org,2002:str', {
   kind: 'scalar',
-  construct: function (data) { return data !== null ? data : ''; }
-});
+  construct: function (data) { return data !== null ? data : '' }
+})
 
 
 /***/ }),
@@ -41537,83 +36015,83 @@ module.exports = new Type('tag:yaml.org,2002:str', {
 "use strict";
 
 
-var Type = __nccwpck_require__(6073);
+const Type = __nccwpck_require__(6073)
 
-var YAML_DATE_REGEXP = new RegExp(
-  '^([0-9][0-9][0-9][0-9])'          + // [1] year
-  '-([0-9][0-9])'                    + // [2] month
-  '-([0-9][0-9])$');                   // [3] day
+const YAML_DATE_REGEXP = new RegExp(
+  '^([0-9][0-9][0-9][0-9])' + // [1] year
+  '-([0-9][0-9])' + // [2] month
+  '-([0-9][0-9])$')                   // [3] day
 
-var YAML_TIMESTAMP_REGEXP = new RegExp(
-  '^([0-9][0-9][0-9][0-9])'          + // [1] year
-  '-([0-9][0-9]?)'                   + // [2] month
-  '-([0-9][0-9]?)'                   + // [3] day
-  '(?:[Tt]|[ \\t]+)'                 + // ...
-  '([0-9][0-9]?)'                    + // [4] hour
-  ':([0-9][0-9])'                    + // [5] minute
-  ':([0-9][0-9])'                    + // [6] second
-  '(?:\\.([0-9]*))?'                 + // [7] fraction
-  '(?:[ \\t]*(Z|([-+])([0-9][0-9]?)' + // [8] tz [9] tz_sign [10] tz_hour
-  '(?::([0-9][0-9]))?))?$');           // [11] tz_minute
+const YAML_TIMESTAMP_REGEXP = new RegExp(
+  '^([0-9][0-9][0-9][0-9])' + // [1] year
+  '-([0-9][0-9]?)' + // [2] month
+  '-([0-9][0-9]?)' + // [3] day
+  '(?:[Tt]|[ \\t]+)' + // ...
+  '([0-9][0-9]?)' + // [4] hour
+  ':([0-9][0-9])' + // [5] minute
+  ':([0-9][0-9])' + // [6] second
+  '(?:\\.([0-9]*))?' + // [7] fraction
+  '(?:[ \\t]*(Z|([-+])([0-9][0-9]?)' + // [8] tz [9] tz_sign [10] tzHour
+  '(?::([0-9][0-9]))?))?$')           // [11] tzMinute
 
-function resolveYamlTimestamp(data) {
-  if (data === null) return false;
-  if (YAML_DATE_REGEXP.exec(data) !== null) return true;
-  if (YAML_TIMESTAMP_REGEXP.exec(data) !== null) return true;
-  return false;
+function resolveYamlTimestamp (data) {
+  if (data === null) return false
+  if (YAML_DATE_REGEXP.exec(data) !== null) return true
+  if (YAML_TIMESTAMP_REGEXP.exec(data) !== null) return true
+  return false
 }
 
-function constructYamlTimestamp(data) {
-  var match, year, month, day, hour, minute, second, fraction = 0,
-      delta = null, tz_hour, tz_minute, date;
+function constructYamlTimestamp (data) {
+  let fraction = 0
+  let delta = null
 
-  match = YAML_DATE_REGEXP.exec(data);
-  if (match === null) match = YAML_TIMESTAMP_REGEXP.exec(data);
+  let match = YAML_DATE_REGEXP.exec(data)
+  if (match === null) match = YAML_TIMESTAMP_REGEXP.exec(data)
 
-  if (match === null) throw new Error('Date resolve error');
+  if (match === null) throw new Error('Date resolve error')
 
   // match: [1] year [2] month [3] day
 
-  year = +(match[1]);
-  month = +(match[2]) - 1; // JS month starts with 0
-  day = +(match[3]);
+  const year = +(match[1])
+  const month = +(match[2]) - 1 // JS month starts with 0
+  const day = +(match[3])
 
   if (!match[4]) { // no hour
-    return new Date(Date.UTC(year, month, day));
+    return new Date(Date.UTC(year, month, day))
   }
 
   // match: [4] hour [5] minute [6] second [7] fraction
 
-  hour = +(match[4]);
-  minute = +(match[5]);
-  second = +(match[6]);
+  const hour = +(match[4])
+  const minute = +(match[5])
+  const second = +(match[6])
 
   if (match[7]) {
-    fraction = match[7].slice(0, 3);
+    fraction = match[7].slice(0, 3)
     while (fraction.length < 3) { // milli-seconds
-      fraction += '0';
+      fraction += '0'
     }
-    fraction = +fraction;
+    fraction = +fraction
   }
 
-  // match: [8] tz [9] tz_sign [10] tz_hour [11] tz_minute
+  // match: [8] tz [9] tz_sign [10] tzHour [11] tzMinute
 
   if (match[9]) {
-    tz_hour = +(match[10]);
-    tz_minute = +(match[11] || 0);
-    delta = (tz_hour * 60 + tz_minute) * 60000; // delta in mili-seconds
-    if (match[9] === '-') delta = -delta;
+    const tzHour = +(match[10])
+    const tzMinute = +(match[11] || 0)
+    delta = (tzHour * 60 + tzMinute) * 60000 // delta in mili-seconds
+    if (match[9] === '-') delta = -delta
   }
 
-  date = new Date(Date.UTC(year, month, day, hour, minute, second, fraction));
+  const date = new Date(Date.UTC(year, month, day, hour, minute, second, fraction))
 
-  if (delta) date.setTime(date.getTime() - delta);
+  if (delta) date.setTime(date.getTime() - delta)
 
-  return date;
+  return date
 }
 
-function representYamlTimestamp(object /*, style*/) {
-  return object.toISOString();
+function representYamlTimestamp (object /*, style */) {
+  return object.toISOString()
 }
 
 module.exports = new Type('tag:yaml.org,2002:timestamp', {
@@ -41622,7 +36100,7 @@ module.exports = new Type('tag:yaml.org,2002:timestamp', {
   construct: constructYamlTimestamp,
   instanceOf: Date,
   represent: representYamlTimestamp
-});
+})
 
 
 /***/ }),
@@ -45862,15 +40340,6 @@ function onceStrict (fn) {
 
 /***/ }),
 
-/***/ 94833:
-/***/ ((module) => {
-
-"use strict";
-function _typeof(obj){"@babel/helpers - typeof";return _typeof="function"==typeof Symbol&&"symbol"==typeof Symbol.iterator?function(obj){return typeof obj}:function(obj){return obj&&"function"==typeof Symbol&&obj.constructor===Symbol&&obj!==Symbol.prototype?"symbol":typeof obj},_typeof(obj)}function _createForOfIteratorHelper(o,allowArrayLike){var it=typeof Symbol!=="undefined"&&o[Symbol.iterator]||o["@@iterator"];if(!it){if(Array.isArray(o)||(it=_unsupportedIterableToArray(o))||allowArrayLike&&o&&typeof o.length==="number"){if(it)o=it;var i=0;var F=function F(){};return{s:F,n:function n(){if(i>=o.length)return{done:true};return{done:false,value:o[i++]}},e:function e(_e2){throw _e2},f:F}}throw new TypeError("Invalid attempt to iterate non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}var normalCompletion=true,didErr=false,err;return{s:function s(){it=it.call(o)},n:function n(){var step=it.next();normalCompletion=step.done;return step},e:function e(_e3){didErr=true;err=_e3},f:function f(){try{if(!normalCompletion&&it["return"]!=null)it["return"]()}finally{if(didErr)throw err}}}}function _defineProperty(obj,key,value){key=_toPropertyKey(key);if(key in obj){Object.defineProperty(obj,key,{value:value,enumerable:true,configurable:true,writable:true})}else{obj[key]=value}return obj}function _toPropertyKey(arg){var key=_toPrimitive(arg,"string");return _typeof(key)==="symbol"?key:String(key)}function _toPrimitive(input,hint){if(_typeof(input)!=="object"||input===null)return input;var prim=input[Symbol.toPrimitive];if(prim!==undefined){var res=prim.call(input,hint||"default");if(_typeof(res)!=="object")return res;throw new TypeError("@@toPrimitive must return a primitive value.")}return(hint==="string"?String:Number)(input)}function _slicedToArray(arr,i){return _arrayWithHoles(arr)||_iterableToArrayLimit(arr,i)||_unsupportedIterableToArray(arr,i)||_nonIterableRest()}function _nonIterableRest(){throw new TypeError("Invalid attempt to destructure non-iterable instance.\nIn order to be iterable, non-array objects must have a [Symbol.iterator]() method.")}function _unsupportedIterableToArray(o,minLen){if(!o)return;if(typeof o==="string")return _arrayLikeToArray(o,minLen);var n=Object.prototype.toString.call(o).slice(8,-1);if(n==="Object"&&o.constructor)n=o.constructor.name;if(n==="Map"||n==="Set")return Array.from(o);if(n==="Arguments"||/^(?:Ui|I)nt(?:8|16|32)(?:Clamped)?Array$/.test(n))return _arrayLikeToArray(o,minLen)}function _arrayLikeToArray(arr,len){if(len==null||len>arr.length)len=arr.length;for(var i=0,arr2=new Array(len);i<len;i++){arr2[i]=arr[i]}return arr2}function _iterableToArrayLimit(arr,i){var _i=null==arr?null:"undefined"!=typeof Symbol&&arr[Symbol.iterator]||arr["@@iterator"];if(null!=_i){var _s,_e,_x,_r,_arr=[],_n=!0,_d=!1;try{if(_x=(_i=_i.call(arr)).next,0===i){if(Object(_i)!==_i)return;_n=!1}else for(;!(_n=(_s=_x.call(_i)).done)&&(_arr.push(_s.value),_arr.length!==i);_n=!0){;}}catch(err){_d=!0,_e=err}finally{try{if(!_n&&null!=_i["return"]&&(_r=_i["return"](),Object(_r)!==_r))return}finally{if(_d)throw _e}}return _arr}}function _arrayWithHoles(arr){if(Array.isArray(arr))return arr}module.exports=function(input){if(!input)return[];if(typeof input!=="string"||input.match(/^\s+$/))return[];var lines=input.split("\n");if(lines.length===0)return[];var files=[];var currentFile=null;var currentChunk=null;var deletedLineCounter=0;var addedLineCounter=0;var currentFileChanges=null;var normal=function normal(line){var _currentChunk;(_currentChunk=currentChunk)===null||_currentChunk===void 0?void 0:_currentChunk.changes.push({type:"normal",normal:true,ln1:deletedLineCounter++,ln2:addedLineCounter++,content:line});currentFileChanges.oldLines--;currentFileChanges.newLines--};var start=function start(line){var _parseFiles;var _ref=(_parseFiles=parseFiles(line))!==null&&_parseFiles!==void 0?_parseFiles:[],_ref2=_slicedToArray(_ref,2),fromFileName=_ref2[0],toFileName=_ref2[1];currentFile={chunks:[],deletions:0,additions:0,from:fromFileName,to:toFileName};files.push(currentFile)};var restart=function restart(){if(!currentFile||currentFile.chunks.length)start()};var newFile=function newFile(_,match){restart();currentFile["new"]=true;currentFile.newMode=match[1];currentFile.from="/dev/null"};var deletedFile=function deletedFile(_,match){restart();currentFile.deleted=true;currentFile.oldMode=match[1];currentFile.to="/dev/null"};var oldMode=function oldMode(_,match){restart();currentFile.oldMode=match[1]};var newMode=function newMode(_,match){restart();currentFile.newMode=match[1]};var index=function index(line,match){restart();currentFile.index=line.split(" ").slice(1);if(match[1]){currentFile.oldMode=currentFile.newMode=match[1].trim()}};var fromFile=function fromFile(line){restart();currentFile.from=parseOldOrNewFile(line)};var toFile=function toFile(line){restart();currentFile.to=parseOldOrNewFile(line)};var toNumOfLines=function toNumOfLines(number){return+(number||1)};var chunk=function chunk(line,match){if(!currentFile){start(line)}var _match$slice=match.slice(1),_match$slice2=_slicedToArray(_match$slice,4),oldStart=_match$slice2[0],oldNumLines=_match$slice2[1],newStart=_match$slice2[2],newNumLines=_match$slice2[3];deletedLineCounter=+oldStart;addedLineCounter=+newStart;currentChunk={content:line,changes:[],oldStart:+oldStart,oldLines:toNumOfLines(oldNumLines),newStart:+newStart,newLines:toNumOfLines(newNumLines)};currentFileChanges={oldLines:toNumOfLines(oldNumLines),newLines:toNumOfLines(newNumLines)};currentFile.chunks.push(currentChunk)};var del=function del(line){if(!currentChunk)return;currentChunk.changes.push({type:"del",del:true,ln:deletedLineCounter++,content:line});currentFile.deletions++;currentFileChanges.oldLines--};var add=function add(line){if(!currentChunk)return;currentChunk.changes.push({type:"add",add:true,ln:addedLineCounter++,content:line});currentFile.additions++;currentFileChanges.newLines--};var eof=function eof(line){var _currentChunk$changes3;if(!currentChunk)return;var _currentChunk$changes=currentChunk.changes.slice(-1),_currentChunk$changes2=_slicedToArray(_currentChunk$changes,1),mostRecentChange=_currentChunk$changes2[0];currentChunk.changes.push((_currentChunk$changes3={type:mostRecentChange.type},_defineProperty(_currentChunk$changes3,mostRecentChange.type,true),_defineProperty(_currentChunk$changes3,"ln1",mostRecentChange.ln1),_defineProperty(_currentChunk$changes3,"ln2",mostRecentChange.ln2),_defineProperty(_currentChunk$changes3,"ln",mostRecentChange.ln),_defineProperty(_currentChunk$changes3,"content",line),_currentChunk$changes3))};var schemaHeaders=[[/^diff\s/,start],[/^new file mode (\d+)$/,newFile],[/^deleted file mode (\d+)$/,deletedFile],[/^old mode (\d+)$/,oldMode],[/^new mode (\d+)$/,newMode],[/^index\s[\da-zA-Z]+\.\.[\da-zA-Z]+(\s(\d+))?$/,index],[/^---\s/,fromFile],[/^\+\+\+\s/,toFile],[/^@@\s+-(\d+),?(\d+)?\s+\+(\d+),?(\d+)?\s@@/,chunk],[/^\\ No newline at end of file$/,eof]];var schemaContent=[[/^\\ No newline at end of file$/,eof],[/^-/,del],[/^\+/,add],[/^\s+/,normal]];var parseContentLine=function parseContentLine(line){for(var _i2=0,_schemaContent=schemaContent;_i2<_schemaContent.length;_i2++){var _schemaContent$_i=_slicedToArray(_schemaContent[_i2],2),pattern=_schemaContent$_i[0],handler=_schemaContent$_i[1];var match=line.match(pattern);if(match){handler(line,match);break}}if(currentFileChanges.oldLines===0&&currentFileChanges.newLines===0){currentFileChanges=null}};var parseHeaderLine=function parseHeaderLine(line){for(var _i3=0,_schemaHeaders=schemaHeaders;_i3<_schemaHeaders.length;_i3++){var _schemaHeaders$_i=_slicedToArray(_schemaHeaders[_i3],2),pattern=_schemaHeaders$_i[0],handler=_schemaHeaders$_i[1];var match=line.match(pattern);if(match){handler(line,match);break}}};var parseLine=function parseLine(line){if(currentFileChanges){parseContentLine(line)}else{parseHeaderLine(line)}return};var _iterator=_createForOfIteratorHelper(lines),_step;try{for(_iterator.s();!(_step=_iterator.n()).done;){var line=_step.value;parseLine(line)}}catch(err){_iterator.e(err)}finally{_iterator.f()}return files};var fileNameDiffRegex=/(a|i|w|c|o|1|2)\/.*(?=["']? ["']?(b|i|w|c|o|1|2)\/)|(b|i|w|c|o|1|2)\/.*$/g;var gitFileHeaderRegex=/^(a|b|i|w|c|o|1|2)\//;var parseFiles=function parseFiles(line){var fileNames=line===null||line===void 0?void 0:line.match(fileNameDiffRegex);return fileNames===null||fileNames===void 0?void 0:fileNames.map(function(fileName){return fileName.replace(gitFileHeaderRegex,"").replace(/("|')$/,"")})};var qoutedFileNameRegex=/^\\?['"]|\\?['"]$/g;var parseOldOrNewFile=function parseOldOrNewFile(line){var fileName=leftTrimChars(line,"-+").trim();fileName=removeTimeStamp(fileName);return fileName.replace(qoutedFileNameRegex,"").replace(gitFileHeaderRegex,"")};var leftTrimChars=function leftTrimChars(string,trimmingChars){string=makeString(string);if(!trimmingChars&&String.prototype.trimLeft)return string.trimLeft();var trimmingString=formTrimmingString(trimmingChars);return string.replace(new RegExp("^".concat(trimmingString,"+")),"")};var timeStampRegex=/\t.*|\d{4}-\d\d-\d\d\s\d\d:\d\d:\d\d(.\d+)?\s(\+|-)\d\d\d\d/;var removeTimeStamp=function removeTimeStamp(string){var timeStamp=timeStampRegex.exec(string);if(timeStamp){string=string.substring(0,timeStamp.index).trim()}return string};var formTrimmingString=function formTrimmingString(trimmingChars){if(trimmingChars===null||trimmingChars===undefined)return"\\s";else if(trimmingChars instanceof RegExp)return trimmingChars.source;return"[".concat(makeString(trimmingChars).replace(/([.*+?^=!:${}()|[\]/\\])/g,"\\$1"),"]")};var makeString=function makeString(itemToConvert){return(itemToConvert!==null&&itemToConvert!==void 0?itemToConvert:"")+""};
-
-
-/***/ }),
-
 /***/ 71480:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -45891,6 +40360,9 @@ function _typeof(obj){"@babel/helpers - typeof";return _typeof="function"==typeo
 // limitations under the License.
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.DefaultChangelogNotes = void 0;
+// Namespace imports let ncc include the template in the Action bundle.
+const fs = __nccwpck_require__(57147);
+const path = __nccwpck_require__(71017);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const conventionalChangelogWriter = __nccwpck_require__(86207);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -45898,7 +40370,9 @@ const presetFactory = __nccwpck_require__(88761);
 const DEFAULT_HOST = 'https://github.com';
 class DefaultChangelogNotes {
     constructor(options = {}) {
-        this.commitPartial = options.commitPartial;
+        this.commitPartial =
+            options.commitPartial ||
+                fs.readFileSync(__nccwpck_require__.ab + "default-commit.hbs", 'utf8');
         this.headerPartial = options.headerPartial;
         this.mainTemplate = options.mainTemplate;
     }
@@ -45917,8 +40391,7 @@ class DefaultChangelogNotes {
             config.types = options.changelogSections;
         }
         const preset = await presetFactory(config);
-        preset.writerOpts.commitPartial =
-            this.commitPartial || preset.writerOpts.commitPartial;
+        preset.writerOpts.commitPartial = this.commitPartial;
         preset.writerOpts.headerPartial =
             this.headerPartial || preset.writerOpts.headerPartial;
         preset.writerOpts.mainTemplate =
@@ -46556,6 +41029,7 @@ exports.getChangelogTypes = getChangelogTypes;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getPluginTypes = exports.unregisterPlugin = exports.registerPlugin = exports.buildPlugin = void 0;
 const linked_versions_1 = __nccwpck_require__(59641);
+const release_dependencies_1 = __nccwpck_require__(26006);
 const cargo_workspace_1 = __nccwpck_require__(77430);
 const node_workspace_1 = __nccwpck_require__(23256);
 const maven_workspace_1 = __nccwpck_require__(66113);
@@ -46563,6 +41037,7 @@ const errors_1 = __nccwpck_require__(93637);
 const sentence_case_1 = __nccwpck_require__(36662);
 const group_priority_1 = __nccwpck_require__(83172);
 const pluginFactories = {
+    'release-dependencies': options => new release_dependencies_1.ReleaseDependencies(options.github, options.targetBranch, options.repositoryConfig, options.type.rules, options.separatePullRequests),
     'linked-versions': options => 
     // NOTE: linked-versions had already have a different behavior about merging
     // see test/plugins/compatibility/linked-versions-workspace.ts
@@ -46739,6 +41214,7 @@ const elixir_1 = __nccwpck_require__(91731);
 const expo_1 = __nccwpck_require__(181);
 const go_1 = __nccwpck_require__(45953);
 const go_yoshi_1 = __nccwpck_require__(6492);
+const go_librarian_1 = __nccwpck_require__(85694);
 const helm_1 = __nccwpck_require__(97687);
 const java_1 = __nccwpck_require__(46892);
 const java_yoshi_1 = __nccwpck_require__(35330);
@@ -46746,13 +41222,17 @@ const java_yoshi_mono_repo_1 = __nccwpck_require__(77664);
 const krm_blueprint_1 = __nccwpck_require__(76397);
 const maven_1 = __nccwpck_require__(60899);
 const node_1 = __nccwpck_require__(78957);
+const node_librarian_1 = __nccwpck_require__(30606);
 const ocaml_1 = __nccwpck_require__(72064);
 const php_1 = __nccwpck_require__(57658);
 const php_yoshi_1 = __nccwpck_require__(88460);
+const php_librarian_1 = __nccwpck_require__(46692);
 const python_1 = __nccwpck_require__(32109);
+const python_librarian_1 = __nccwpck_require__(48149);
 const r_1 = __nccwpck_require__(92918);
 const ruby_1 = __nccwpck_require__(68142);
 const ruby_yoshi_1 = __nccwpck_require__(72294);
+const ruby_librarian_1 = __nccwpck_require__(79773);
 const rust_1 = __nccwpck_require__(43066);
 const sfdx_1 = __nccwpck_require__(87648);
 const simple_1 = __nccwpck_require__(10591);
@@ -46767,6 +41247,7 @@ const releasers = {
     'dotnet-yoshi': options => new dotnet_yoshi_1.DotnetYoshi(options),
     go: options => new go_1.Go(options),
     'go-yoshi': options => new go_yoshi_1.GoYoshi(options),
+    'go-librarian': options => new go_librarian_1.GoLibrarian(options),
     java: options => new java_1.Java(options),
     maven: options => new maven_1.Maven(options),
     'java-yoshi': options => new java_yoshi_1.JavaYoshi(options),
@@ -46788,14 +41269,18 @@ const releasers = {
     }),
     'krm-blueprint': options => new krm_blueprint_1.KRMBlueprint(options),
     node: options => new node_1.Node(options),
+    'node-librarian': options => new node_librarian_1.NodeLibrarian(options),
     expo: options => new expo_1.Expo(options),
     ocaml: options => new ocaml_1.OCaml(options),
     php: options => new php_1.PHP(options),
     'php-yoshi': options => new php_yoshi_1.PHPYoshi(options),
+    'php-librarian': options => new php_librarian_1.PHPLibrarian(options),
     python: options => new python_1.Python(options),
+    'python-librarian': options => new python_librarian_1.PythonLibrarian(options),
     r: options => new r_1.R(options),
     ruby: options => new ruby_1.Ruby(options),
     'ruby-yoshi': options => new ruby_yoshi_1.RubyYoshi(options),
+    'ruby-librarian': options => new ruby_librarian_1.RubyLibrarian(options),
     rust: options => new rust_1.Rust(options),
     salesforce: options => new sfdx_1.Sfdx(options),
     sfdx: options => new sfdx_1.Sfdx(options),
@@ -46909,6 +41394,19 @@ class GitHubApi {
                         throw err;
                     }
                     this.logger.info(`received 502 error, ${maxRetries} attempts remaining`);
+                    if (typeof opts.num === 'number') {
+                        if (maxRetries === 1) {
+                            this.logger.info('last retry, forcing batch size to 1');
+                            opts.num = 1;
+                        }
+                        else {
+                            const nextNum = Math.floor(opts.num / 2);
+                            if (nextNum >= 1) {
+                                this.logger.info(`halving batch size from ${opts.num} to ${nextNum}`);
+                                opts.num = nextNum;
+                            }
+                        }
+                    }
                 }
                 maxRetries -= 1;
                 if (maxRetries >= 0) {
@@ -47097,6 +41595,66 @@ class GitHubApi {
         this.octokit = options.octokitAPIs.octokit;
         this.graphql = options.octokitAPIs.graphql;
         this.logger = (_a = options.logger) !== null && _a !== void 0 ? _a : logger_1.logger;
+    }
+    /**
+     * Resolve one exact tag ref to its commit without listing repository tags.
+     * Annotated tags may point to other annotated tags, so peel the entire chain.
+     */
+    async getTagByName(tagName) {
+        this.logger.debug(`Fetching tag ${tagName}`);
+        const reference = await this.readTagRequest(tagName, () => this.octokit.git.getRef({
+            owner: this.repository.owner,
+            repo: this.repository.repo,
+            ref: `tags/${tagName}`,
+        })).catch(error => {
+            if (error instanceof errors_1.GitHubAPIError && error.status === 404) {
+                return undefined;
+            }
+            throw error;
+        });
+        if (!reference)
+            return undefined;
+        if (reference.data.ref !== `refs/tags/${tagName}`) {
+            throw new Error(`Unexpected reference while resolving tag ${tagName}`);
+        }
+        let object = reference.data.object;
+        const visited = new Set();
+        while (object.type === 'tag') {
+            if (visited.has(object.sha)) {
+                throw new Error(`Cyclic annotation chain for tag ${tagName}`);
+            }
+            visited.add(object.sha);
+            const tagSha = object.sha;
+            const annotation = await this.readTagRequest(tagName, () => this.octokit.git.getTag({
+                owner: this.repository.owner,
+                repo: this.repository.repo,
+                tag_sha: tagSha,
+            }));
+            object = annotation.data.object;
+        }
+        if (object.type !== 'commit') {
+            throw new Error(`Tag ${tagName} does not point to a commit`);
+        }
+        return { name: tagName, sha: object.sha };
+    }
+    async readTagRequest(tagName, request) {
+        var _a;
+        for (let attempt = 0;; attempt++) {
+            try {
+                return await request();
+            }
+            catch (error) {
+                if (!(error instanceof request_error_1.RequestError))
+                    throw error;
+                const requestId = (_a = error.response) === null || _a === void 0 ? void 0 : _a.headers['x-github-request-id'];
+                const failure = new errors_1.GitHubAPIError(error, `Failed to resolve tag ${tagName} (HTTP ${error.status}${requestId ? `, request ${requestId}` : ''}): ${error.message || 'GitHub returned an empty error response'}`);
+                if (attempt >= 2 || ![500, 502, 503, 504].includes(error.status)) {
+                    throw failure;
+                }
+                this.logger.warn(`${failure.message}; retrying tag read`);
+                await (0, exports.sleepInMs)(1000 * 2 ** attempt);
+            }
+        }
     }
     static createDefaultAgent(baseUrl, defaultProxy) {
         if (!defaultProxy) {
@@ -47582,7 +42140,7 @@ exports.sleepInMs = sleepInMs;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.sleepInMs = exports.GitHub = void 0;
 const request_error_1 = __nccwpck_require__(10537);
-const code_suggester_1 = __nccwpck_require__(77103);
+const code_suggester_1 = __nccwpck_require__(44611);
 const errors_1 = __nccwpck_require__(93637);
 const MAX_ISSUE_BODY_SIZE = 65536;
 const MAX_SLEEP_SECONDS = 20;
@@ -47647,6 +42205,19 @@ class GitHub {
                         throw err;
                     }
                     this.logger.info(`received 502 error, ${maxRetries} attempts remaining`);
+                    if (typeof opts.num === 'number') {
+                        if (maxRetries === 1) {
+                            this.logger.info('last retry, forcing batch size to 1');
+                            opts.num = 1;
+                        }
+                        else {
+                            const nextNum = Math.floor(opts.num / 2);
+                            if (nextNum >= 1) {
+                                this.logger.info(`halving batch size from ${opts.num} to ${nextNum}`);
+                                opts.num = nextNum;
+                            }
+                        }
+                    }
                 }
                 maxRetries -= 1;
                 if (maxRetries >= 0) {
@@ -48008,6 +42579,9 @@ class GitHub {
                 break;
         }
     }
+    async getTagByName(tagName) {
+        return this.gitHubApi.getTagByName(tagName);
+    }
     /**
      * Fetch the contents of a file from the configured branch
      *
@@ -48366,7 +42940,7 @@ Object.defineProperty(exports, "GitHub", ({ enumerable: true, get: function () {
 exports.configSchema = __nccwpck_require__(38623);
 exports.manifestSchema = __nccwpck_require__(45314);
 // x-release-please-start-version
-exports.VERSION = '17.6.0';
+exports.VERSION = '17.11.2';
 // x-release-please-end
 //# sourceMappingURL=index.js.map
 
@@ -48403,6 +42977,7 @@ const factory_1 = __nccwpck_require__(75695);
 const merge_1 = __nccwpck_require__(90514);
 const release_please_manifest_1 = __nccwpck_require__(9817);
 const errors_1 = __nccwpck_require__(93637);
+const release_dependencies_1 = __nccwpck_require__(26006);
 const pull_request_overflow_handler_1 = __nccwpck_require__(93937);
 const signoff_commit_message_1 = __nccwpck_require__(2686);
 const commit_exclude_1 = __nccwpck_require__(14702);
@@ -48567,7 +43142,6 @@ class Manifest {
      * @returns {ReleasePullRequest[]} The candidate pull requests to open or update.
      */
     async buildPullRequests() {
-        var _a;
         this.logger.info('Building pull requests');
         const pathsByComponent = await this.getPathsByComponent();
         const strategiesByPath = await this.getStrategiesByPath();
@@ -48589,26 +43163,28 @@ class Manifest {
                 continue;
             }
             const component = tagName.component || exports.DEFAULT_COMPONENT_NAME;
-            const path = pathsByComponent[component];
-            if (!path) {
+            const paths = pathsByComponent[component] || [];
+            if (paths.length === 0) {
                 this.logger.warn(`Found release tag with component '${component}', but not configured in manifest`);
                 continue;
             }
-            const expectedVersion = this.releasedVersions[path];
-            if (!expectedVersion) {
-                this.logger.warn(`Unable to find expected version for path '${path}' in manifest`);
-                continue;
-            }
-            if (expectedVersion.toString() === tagName.version.toString()) {
-                this.logger.debug(`Found release for path ${path}, ${release.tagName}`);
-                releaseShasByPath[path] = release.sha;
-                releasesByPath[path] = {
-                    name: release.name,
-                    tag: tagName,
-                    sha: release.sha,
-                    notes: release.notes || '',
-                };
-                releasesFound += 1;
+            for (const path of paths) {
+                const expectedVersion = this.releasedVersions[path];
+                if (!expectedVersion) {
+                    this.logger.warn(`Unable to find expected version for path '${path}' in manifest`);
+                    continue;
+                }
+                if (expectedVersion.toString() === tagName.version.toString()) {
+                    this.logger.debug(`Found release for path ${path}, ${release.tagName}`);
+                    releaseShasByPath[path] = release.sha;
+                    releasesByPath[path] = {
+                        name: release.name,
+                        tag: tagName,
+                        sha: release.sha,
+                        notes: release.notes || '',
+                    };
+                    releasesFound += 1;
+                }
             }
             if (releasesFound >= expectedReleases) {
                 break;
@@ -48647,15 +43223,10 @@ class Manifest {
         const releaseShas = new Set(Object.values(releaseShasByPath));
         this.logger.debug(releaseShas);
         const expectedShas = releaseShas.size;
-        // sha => release pull request
-        const releasePullRequestsBySha = {};
         let releaseCommitsFound = 0;
         for await (const commit of commitGenerator) {
             if (releaseShas.has(commit.sha)) {
-                if (commit.pullRequest) {
-                    releasePullRequestsBySha[commit.sha] = commit.pullRequest;
-                }
-                else {
+                if (!commit.pullRequest) {
                     this.logger.warn(`Release SHA ${commit.sha} did not have an associated pull request`);
                 }
                 releaseCommitsFound += 1;
@@ -48717,49 +43288,55 @@ class Manifest {
         for (const plugin of this.plugins) {
             strategies = await plugin.preconfigure(strategies, commitsPerPath, releasesByPath);
         }
-        let newReleasePullRequests = [];
-        for (const path in this.repositoryConfig) {
-            const config = this.repositoryConfig[path];
-            this.logger.info(`Building candidate release pull request for path: ${path}`);
-            this.logger.debug(`type: ${config.releaseType}`);
-            this.logger.debug(`targetBranch: ${this.targetBranch}`);
-            let pathCommits = (0, commit_1.parseConventionalCommits)(commitsPerPath[path], this.logger);
-            // The processCommits hook can be implemented by plugins to
-            // post-process commits. This can be used to perform cleanup, e.g,, sentence
-            // casing all commit messages:
-            for (const plugin of this.plugins) {
-                pathCommits = plugin.processCommits(pathCommits);
-            }
-            this.logger.debug(`commits: ${pathCommits.length}`);
-            const latestReleasePullRequest = releasePullRequestsBySha[releaseShasByPath[path]];
-            if (!latestReleasePullRequest) {
-                this.logger.warn('No latest release pull request found.');
-            }
-            const strategy = strategies[path];
-            const latestRelease = releasesByPath[path];
-            const releasePullRequest = await strategy.buildReleasePullRequest(pathCommits, latestRelease, (_a = config.draftPullRequest) !== null && _a !== void 0 ? _a : this.draftPullRequest, this.labels);
-            if (releasePullRequest) {
-                // Update manifest, but only for valid release version - this will skip SNAPSHOT from java strategy
-                if (releasePullRequest.version &&
-                    isPublishedVersion(strategy, releasePullRequest.version)) {
-                    const versionsMap = new Map();
-                    versionsMap.set(path, releasePullRequest.version);
-                    releasePullRequest.updates.push({
-                        path: this.manifestPath,
-                        createIfMissing: false,
-                        updater: new release_please_manifest_1.ReleasePleaseManifest({
-                            version: releasePullRequest.version,
-                            versionsMap,
-                        }),
-                    });
-                }
-                newReleasePullRequests.push({
-                    path,
-                    config,
-                    pullRequest: releasePullRequest,
-                });
-            }
+        const releaseDependencies = this.plugins.filter((plugin) => plugin instanceof release_dependencies_1.ReleaseDependencies);
+        if (releaseDependencies.length > 1) {
+            throw new errors_1.ConfigurationError('Only one release-dependencies plugin may be configured', 'release-dependencies', `${this.repository.owner}/${this.repository.repo}`);
         }
+        // Rebuild candidates from their original commits when dependencies force a
+        // new version. Workspace plugins can themselves create source candidates,
+        // and can merge their candidates, so resolving only once before or after
+        // them would miss cross-workspace dependencies or downstream workspace bumps.
+        const buildCandidates = async (versionOverrides) => {
+            var _a;
+            const candidates = [];
+            for (const path in this.repositoryConfig) {
+                const config = this.repositoryConfig[path];
+                let pathCommits = (0, commit_1.parseConventionalCommits)(commitsPerPath[path], this.logger);
+                for (const plugin of this.plugins) {
+                    pathCommits = plugin.processCommits(pathCommits);
+                }
+                const strategy = strategies[path];
+                const releasePullRequest = await strategy.buildReleasePullRequest(pathCommits, releasesByPath[path], (_a = config.draftPullRequest) !== null && _a !== void 0 ? _a : this.draftPullRequest, this.labels, versionOverrides.has(path)
+                    ? { newVersion: versionOverrides.get(path) }
+                    : undefined);
+                if (releasePullRequest) {
+                    if (versionOverrides.has(path) &&
+                        (!releasePullRequest.version ||
+                            !isPublishedVersion(strategy, releasePullRequest.version))) {
+                        throw new errors_1.ConfigurationError(`Forced release for ${path} has no publishable version`, 'release-dependencies', `${this.repository.owner}/${this.repository.repo}`);
+                    }
+                    if (releasePullRequest.version &&
+                        isPublishedVersion(strategy, releasePullRequest.version)) {
+                        const versionsMap = new Map();
+                        versionsMap.set(path, releasePullRequest.version);
+                        releasePullRequest.updates.push({
+                            path: this.manifestPath,
+                            createIfMissing: false,
+                            updater: new release_please_manifest_1.ReleasePleaseManifest({
+                                version: releasePullRequest.version,
+                                versionsMap,
+                            }),
+                        });
+                    }
+                    candidates.push({ path, config, pullRequest: releasePullRequest });
+                }
+                else if (versionOverrides.has(path)) {
+                    throw new errors_1.ConfigurationError(`Could not build forced release for ${path}`, 'release-dependencies', `${this.repository.owner}/${this.repository.repo}`);
+                }
+            }
+            return candidates;
+        };
+        const plugins = [...this.plugins];
         // Combine pull requests into 1 unless configured for separate
         // pull requests
         if (!this.separatePullRequests) {
@@ -48783,17 +43360,65 @@ class Manifest {
                     mergeOptions.componentNoSpace = config.componentNoSpace;
                 }
             }
-            this.plugins.push(new merge_1.Merge(this.github, this.targetBranch, this.repositoryConfig, mergeOptions));
+            plugins.push(new merge_1.Merge(this.github, this.targetBranch, this.repositoryConfig, mergeOptions));
         }
-        for (const plugin of this.plugins) {
-            this.logger.debug(`running plugin: ${plugin.constructor.name}`);
-            newReleasePullRequests = await plugin.run(newReleasePullRequests);
+        const versionOverrides = new Map();
+        let previousReasons = new Map();
+        for (let pass = 0; pass <= Object.keys(this.repositoryConfig).length * 2 + 1; pass++) {
+            let candidates = await buildCandidates(versionOverrides);
+            for (const plugin of plugins) {
+                this.logger.debug(`running plugin: ${plugin.constructor.name}`);
+                candidates = await plugin.run(candidates);
+            }
+            const dependencyPlugin = releaseDependencies[0];
+            if (!dependencyPlugin) {
+                return candidates.map(candidate => candidate.pullRequest);
+            }
+            await dependencyPlugin.addNotes(candidates, previousReasons, strategies);
+            const resolution = await dependencyPlugin.resolve(candidates, {
+                releasesByPath,
+                releasedVersions: this.releasedVersions,
+                strategiesByPath: strategies,
+            });
+            let changed = false;
+            for (const [path, version] of resolution.versions) {
+                const previous = versionOverrides.get(path);
+                if (!previous || version.compare(previous) > 0) {
+                    versionOverrides.set(path, version);
+                    changed = true;
+                }
+            }
+            const reasons = [...resolution.reasons].map(([path, entries]) => [
+                path,
+                ...entries,
+            ]);
+            const oldReasons = [...previousReasons].map(([path, entries]) => [
+                path,
+                ...entries,
+            ]);
+            if (!changed && JSON.stringify(reasons) === JSON.stringify(oldReasons)) {
+                for (const [path, required] of versionOverrides) {
+                    const observed = resolution.observedVersions.get(path);
+                    if (!observed || observed.compare(required) < 0) {
+                        throw new errors_1.ConfigurationError(`Required release for ${path} was filtered or is below ${required}`, 'release-dependencies', `${this.repository.owner}/${this.repository.repo}`);
+                    }
+                }
+                return candidates.map(candidate => candidate.pullRequest);
+            }
+            previousReasons = resolution.reasons;
         }
-        return newReleasePullRequests.map(pullRequestWithConfig => pullRequestWithConfig.pullRequest);
+        throw new errors_1.ConfigurationError('Release dependencies did not converge', 'release-dependencies', `${this.repository.owner}/${this.repository.repo}`);
     }
     async backfillReleasesFromTags(missingPaths, strategiesByPath) {
         const releasesByPath = {};
-        const allTags = await this.getAllTags();
+        const tags = new Map();
+        const findTag = async (tag) => {
+            const name = tag.toString();
+            if (!tags.has(name)) {
+                tags.set(name, await this.github.getTagByName(name));
+            }
+            return tags.get(name);
+        };
         for (const path of missingPaths) {
             const expectedVersion = this.releasedVersions[path];
             if (!expectedVersion) {
@@ -48803,7 +43428,7 @@ class Manifest {
             const component = await strategiesByPath[path].getComponent();
             const expectedTag = new tag_name_1.TagName(expectedVersion, component, this.repositoryConfig[path].tagSeparator, this.repositoryConfig[path].includeVInTag);
             this.logger.debug(`looking for tagName: ${expectedTag.toString()}`);
-            const foundTag = allTags[expectedTag.toString()];
+            const foundTag = await findTag(expectedTag);
             if (foundTag) {
                 this.logger.debug(`found: ${foundTag.name} ${foundTag.sha}`);
                 releasesByPath[path] = {
@@ -48819,7 +43444,7 @@ class Manifest {
                     this.logger.debug('could not find release, checking root package');
                     const rootComponent = await strategiesByPath[exports.ROOT_PROJECT_PATH].getComponent();
                     const rootTag = new tag_name_1.TagName(expectedVersion, rootComponent, this.repositoryConfig[exports.ROOT_PROJECT_PATH].tagSeparator, this.repositoryConfig[exports.ROOT_PROJECT_PATH].includeVInTag);
-                    const foundTag = allTags[rootTag.toString()];
+                    const foundTag = await findTag(rootTag);
                     if (foundTag) {
                         this.logger.debug(`found rootTag: ${foundTag.name} ${foundTag.sha}`);
                         releasesByPath[path] = {
@@ -48833,13 +43458,6 @@ class Manifest {
             }
         }
         return releasesByPath;
-    }
-    async getAllTags() {
-        const allTags = {};
-        for await (const tag of this.github.tagIterator()) {
-            allTags[tag.name] = tag;
-        }
-        return allTags;
     }
     /**
      * Opens/updates all candidate release pull requests for this repository.
@@ -49171,10 +43789,10 @@ class Manifest {
             for (const path in this.repositoryConfig) {
                 const strategy = strategiesByPath[path];
                 const component = (await strategy.getComponent()) || '';
-                if (this._pathsByComponent[component]) {
-                    this.logger.warn(`Multiple paths for ${component}: ${this._pathsByComponent[component]}, ${path}`);
+                if (!this._pathsByComponent[component]) {
+                    this._pathsByComponent[component] = [];
                 }
-                this._pathsByComponent[component] = path;
+                this._pathsByComponent[component].push(path);
             }
         }
         return this._pathsByComponent;
@@ -49623,14 +44241,23 @@ const errors_1 = __nccwpck_require__(93637);
  * into a single rust package.
  */
 class CargoWorkspace extends workspace_1.WorkspacePlugin {
-    constructor() {
-        super(...arguments);
+    constructor(github, targetBranch, repositoryConfig, options = {}) {
+        var _a;
+        super(github, targetBranch, repositoryConfig, options);
         this.strategiesByPath = {};
         this.releasesByPath = {};
+        // Normalize: strip leading "./" and trailing slashes
+        // so that "./crates/" becomes "crates" for consistent path joining
+        this.workspacePath = ((_a = options.cargoWorkspacePath) !== null && _a !== void 0 ? _a : '')
+            .replace(/^\.\//, '')
+            .replace(/\/+$/, '');
+    }
+    resolveWorkspacePath(file) {
+        return this.workspacePath ? `${this.workspacePath}/${file}` : file;
     }
     async buildAllPackages(candidates) {
         var _a, _b, _c, _d;
-        const cargoManifestContent = await this.github.getFileContentsOnBranch('Cargo.toml', this.targetBranch);
+        const cargoManifestContent = await this.github.getFileContentsOnBranch(this.resolveWorkspacePath('Cargo.toml'), this.targetBranch);
         const cargoManifest = (0, common_1.parseCargoManifest)(cargoManifestContent.parsedContent);
         if (!((_a = cargoManifest.workspace) === null || _a === void 0 ? void 0 : _a.members)) {
             this.logger.warn("cargo-workspace plugin used, but top-level Cargo.toml isn't a cargo workspace");
@@ -49638,8 +44265,8 @@ class CargoWorkspace extends workspace_1.WorkspacePlugin {
         }
         const allCrates = [];
         const candidatesByPackage = {};
-        const members = (await Promise.all(cargoManifest.workspace.members.map(member => this.github.findFilesByGlobAndRef(member, this.targetBranch)))).flat();
-        members.push(manifest_1.ROOT_PROJECT_PATH);
+        const members = (await Promise.all(cargoManifest.workspace.members.map(member => this.github.findFilesByGlobAndRef(this.resolveWorkspacePath(member), this.targetBranch)))).flat();
+        members.push(this.workspacePath || manifest_1.ROOT_PROJECT_PATH);
         for (const path of members) {
             const manifestPath = (0, workspace_1.addPath)(path, 'Cargo.toml');
             this.logger.info(`looking for candidate with path: ${path}`);
@@ -49794,7 +44421,8 @@ class CargoWorkspace extends workspace_1.WorkspacePlugin {
         };
     }
     postProcessCandidates(candidates, updatedVersions) {
-        let rootCandidate = candidates.find(c => c.path === manifest_1.ROOT_PROJECT_PATH);
+        const rootPath = this.workspacePath || manifest_1.ROOT_PROJECT_PATH;
+        let rootCandidate = candidates.find(c => c.path === rootPath);
         if (!rootCandidate) {
             this.logger.warn('Unable to find root candidate pull request');
             rootCandidate = candidates.find(c => c.config.releaseType === 'rust');
@@ -49805,7 +44433,7 @@ class CargoWorkspace extends workspace_1.WorkspacePlugin {
         }
         // Update the root Cargo.lock if it exists
         rootCandidate.pullRequest.updates.push({
-            path: 'Cargo.lock',
+            path: this.resolveWorkspacePath('Cargo.lock'),
             createIfMissing: false,
             updater: new cargo_lock_1.CargoLock(updatedVersions),
         });
@@ -50146,7 +44774,7 @@ class LinkedVersions extends plugin_1.ManifestPlugin {
         // delegate to the merge plugin and add merged pull request
         if (inScopeCandidates.length > 0) {
             const merge = new merge_1.Merge(this.github, this.targetBranch, this.repositoryConfig, {
-                pullRequestTitlePattern: `chore\${scope}: release ${this.groupName} libraries`,
+                pullRequestTitlePattern: 'chore${scope}: release ' + this.groupName + ' libraries',
                 forceMerge: true,
                 headBranchName: branch_name_1.BranchName.ofGroupTargetBranch(this.groupName, this.targetBranch).toString(),
             });
@@ -50644,7 +45272,7 @@ class Merge extends plugin_1.ManifestPlugin {
         this.forceMerge = (_b = options.forceMerge) !== null && _b !== void 0 ? _b : false;
     }
     async run(candidates) {
-        var _a;
+        var _a, _b;
         if (candidates.length < 1) {
             return candidates;
         }
@@ -50658,6 +45286,9 @@ class Merge extends plugin_1.ManifestPlugin {
             }
             return collection;
         }, [[], []]);
+        if (inScopeCandidates.length === 0) {
+            return outOfScopeCandidates;
+        }
         const releaseData = [];
         const labels = new Set();
         let rawUpdates = [];
@@ -50674,8 +45305,11 @@ class Merge extends plugin_1.ManifestPlugin {
             }
         }
         const updates = (0, composite_1.mergeUpdates)(rawUpdates);
+        // Fall back to the first in-scope candidate when there is no root-path
+        // candidate (common in monorepos where all packages live in subdirectories)
+        const primaryRelease = (_a = rootRelease !== null && rootRelease !== void 0 ? rootRelease : inScopeCandidates[0]) !== null && _a !== void 0 ? _a : null;
         const pullRequest = {
-            title: pull_request_title_1.PullRequestTitle.ofComponentTargetBranchVersion(rootRelease === null || rootRelease === void 0 ? void 0 : rootRelease.pullRequest.title.component, this.targetBranch, rootRelease === null || rootRelease === void 0 ? void 0 : rootRelease.pullRequest.title.version, this.pullRequestTitlePattern, this.componentNoSpace),
+            title: pull_request_title_1.PullRequestTitle.ofComponentTargetBranchVersion(primaryRelease === null || primaryRelease === void 0 ? void 0 : primaryRelease.pullRequest.title.component, this.targetBranch, primaryRelease === null || primaryRelease === void 0 ? void 0 : primaryRelease.pullRequest.title.version, this.pullRequestTitlePattern, this.componentNoSpace),
             body: new pull_request_body_1.PullRequestBody(releaseData, {
                 useComponents: true,
                 header: this.pullRequestHeader,
@@ -50683,7 +45317,8 @@ class Merge extends plugin_1.ManifestPlugin {
             }),
             updates,
             labels: Array.from(labels),
-            headRefName: (_a = this.headBranchName) !== null && _a !== void 0 ? _a : branch_name_1.BranchName.ofTargetBranch(this.targetBranch).toString(),
+            headRefName: (_b = this.headBranchName) !== null && _b !== void 0 ? _b : branch_name_1.BranchName.ofTargetBranch(this.targetBranch).toString(),
+            version: primaryRelease === null || primaryRelease === void 0 ? void 0 : primaryRelease.pullRequest.version,
             draft: !candidates.some(candidate => !candidate.pullRequest.draft),
         };
         const releaseTypes = new Set(candidates.map(candidate => candidate.config.releaseType));
@@ -51061,6 +45696,231 @@ function getChangelogDepsNotes(original, updated, updateVersions, logger) {
     return '';
 }
 //# sourceMappingURL=node-workspace.js.map
+
+/***/ }),
+
+/***/ 26006:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ReleaseDependencies = void 0;
+const errors_1 = __nccwpck_require__(93637);
+const plugin_1 = __nccwpck_require__(31651);
+const changelog_1 = __nccwpck_require__(3325);
+const composite_1 = __nccwpck_require__(40911);
+const versioning_strategy_1 = __nccwpck_require__(41941);
+/**
+ * A release dependency is a directed edge between independently versioned
+ * manifest paths. A publishable source release candidate triggers a release
+ * of its dependent, just as a workspace package release triggers its dependents.
+ */
+class ReleaseDependencies extends plugin_1.ManifestPlugin {
+    constructor(github, targetBranch, repositoryConfig, rules, separatePullRequests = false) {
+        super(github, targetBranch, repositoryConfig);
+        // Related source and dependent versions must share a release PR. Otherwise
+        // a dependent PR could merge first and repeatedly release before its source.
+        if (separatePullRequests) {
+            throw this.error('release dependencies require a combined release pull request');
+        }
+        if (!Array.isArray(rules) || rules.length === 0) {
+            throw this.error('rules must be a non-empty array');
+        }
+        const edges = new Set();
+        for (const rule of rules) {
+            if (!rule ||
+                typeof rule.source !== 'string' ||
+                typeof rule.dependent !== 'string' ||
+                !Object.prototype.hasOwnProperty.call(repositoryConfig, rule.source) ||
+                !Object.prototype.hasOwnProperty.call(repositoryConfig, rule.dependent)) {
+                throw this.error('source and dependent must be configured manifest paths');
+            }
+            if (Object.keys(rule).some(key => !['source', 'dependent', 'minimumBump'].includes(key))) {
+                throw this.error(`unsupported release dependency rule field for ${rule.source} -> ${rule.dependent}`);
+            }
+            if (rule.source === rule.dependent) {
+                throw this.error(`self-dependency: ${rule.source}`);
+            }
+            if (repositoryConfig[rule.source].separatePullRequests ||
+                repositoryConfig[rule.dependent].separatePullRequests) {
+                throw this.error(`release dependency ${rule.source} -> ${rule.dependent} requires a combined release pull request`);
+            }
+            if (rule.minimumBump !== undefined &&
+                !['patch', 'minor', 'major'].includes(rule.minimumBump)) {
+                throw this.error(`invalid minimumBump for ${rule.source} -> ${rule.dependent}`);
+            }
+            if (repositoryConfig[rule.dependent].skipGithubRelease) {
+                throw this.error(`dependent ${rule.dependent} cannot skip its GitHub release`);
+            }
+            const edge = `${rule.source}\0${rule.dependent}`;
+            if (edges.has(edge)) {
+                throw this.error(`duplicate release dependency: ${rule.source} -> ${rule.dependent}`);
+            }
+            edges.add(edge);
+        }
+        this.rules = [...rules].sort((a, b) => (a.dependent < b.dependent ? -1 : a.dependent > b.dependent ? 1 : 0) ||
+            (a.source < b.source ? -1 : a.source > b.source ? 1 : 0));
+        this.order = this.topologicalOrder();
+    }
+    async resolve(candidates, context) {
+        var _a, _b;
+        const pathsByComponent = new Map();
+        for (const path of Object.keys(this.repositoryConfig)) {
+            const component = (await context.strategiesByPath[path].getComponent()) || '';
+            const other = pathsByComponent.get(component);
+            if (other && other !== path) {
+                throw this.error(`ambiguous release component ${component}: ${other}, ${path}`);
+            }
+            pathsByComponent.set(component, path);
+        }
+        const candidateVersions = new Map();
+        for (const candidate of candidates) {
+            for (const data of candidate.pullRequest.body.releaseData) {
+                const path = pathsByComponent.get(data.component || '');
+                if (path && data.version) {
+                    const strategy = context.strategiesByPath[path];
+                    if (strategy.isPublishedVersion &&
+                        !strategy.isPublishedVersion(data.version)) {
+                        continue;
+                    }
+                    const current = candidateVersions.get(path);
+                    if (!current || data.version.compare(current) > 0) {
+                        candidateVersions.set(path, data.version);
+                    }
+                }
+            }
+        }
+        // Keep the versions actually present in the generated PR separate from
+        // the synthetic versions needed to propagate through dependency chains.
+        const observedVersions = new Map(candidateVersions);
+        const versions = new Map();
+        const reasons = new Map();
+        for (const path of this.order) {
+            for (const rule of this.rules.filter(rule => rule.dependent === path)) {
+                if (!candidateVersions.has(rule.source)) {
+                    continue;
+                }
+                const previousVersion = (_a = context.releasedVersions[path]) !== null && _a !== void 0 ? _a : (_b = context.releasesByPath[path]) === null || _b === void 0 ? void 0 : _b.tag.version;
+                if (!previousVersion) {
+                    throw this.error(`missing previously released version for ${path}`);
+                }
+                const required = this.bump(previousVersion, rule.minimumBump || 'patch');
+                const existing = candidateVersions.get(path);
+                if (existing &&
+                    context.strategiesByPath[path].isPublishedVersion &&
+                    !context.strategiesByPath[path].isPublishedVersion(existing)) {
+                    throw this.error(`dependent ${path} has no publishable release candidate`);
+                }
+                if (!existing || existing.compare(required) < 0) {
+                    candidateVersions.set(path, required);
+                    versions.set(path, required);
+                }
+                reasons.set(path, [
+                    ...(reasons.get(path) || []),
+                    `Release of \`${rule.source}\``,
+                ]);
+            }
+        }
+        return { versions, reasons, observedVersions };
+    }
+    /** Add traceable notes without manufacturing a conventional commit. */
+    async addNotes(candidates, reasons, strategiesByPath) {
+        for (const [path, entries] of reasons) {
+            const component = (await strategiesByPath[path].getComponent()) || '';
+            const note = `### Release Dependencies\n\n${entries
+                .map(entry => `* ${entry}`)
+                .join('\n')}`;
+            const configuredChangelogPath = this.repositoryConfig[path].changelogPath || 'CHANGELOG.md';
+            const changelogPath = configuredChangelogPath.startsWith('/')
+                ? configuredChangelogPath.replace(/^\/+/, '')
+                : `${path === '.' ? '' : `${path}/`}${configuredChangelogPath}`;
+            for (const candidate of candidates) {
+                const data = candidate.pullRequest.body.releaseData.find(data => (data.component || '') === component);
+                if (!data)
+                    continue;
+                if (!data.version) {
+                    throw this.error(`release dependency ${path} has no version`);
+                }
+                data.notes = `${data.notes.trim()}\n\n${note}`.trim();
+                for (const update of candidate.pullRequest.updates) {
+                    if (update.path === changelogPath) {
+                        this.addChangelogNote(update, note, data.version);
+                    }
+                }
+            }
+        }
+    }
+    addChangelogNote(update, note, version) {
+        const changelogs = this.changelogUpdaters(update.updater);
+        const matching = changelogs.filter(updater => updater.version.compare(version) === 0);
+        if (changelogs.length > 0 && matching.length !== 1) {
+            throw this.error(`cannot identify the ${version} changelog update at ${update.path}`);
+        }
+        if (matching.length === 1) {
+            matching[0].changelogEntry =
+                `${matching[0].changelogEntry.trim()}\n\n${note}`.trim();
+        }
+    }
+    changelogUpdaters(updater) {
+        if (updater instanceof changelog_1.Changelog)
+            return [updater];
+        if (updater instanceof composite_1.CompositeUpdater) {
+            return updater.updaters.flatMap(part => this.changelogUpdaters(part));
+        }
+        return [];
+    }
+    bump(version, kind) {
+        switch (kind) {
+            case 'major':
+                return new versioning_strategy_1.MajorVersionUpdate().bump(version);
+            case 'minor':
+                return new versioning_strategy_1.MinorVersionUpdate().bump(version);
+            case 'patch':
+                return new versioning_strategy_1.PatchVersionUpdate().bump(version);
+        }
+    }
+    topologicalOrder() {
+        const visiting = new Set();
+        const visited = new Set();
+        const order = [];
+        const visit = (path) => {
+            if (visiting.has(path)) {
+                throw this.error(`cycle in release dependencies at ${path}`);
+            }
+            if (visited.has(path))
+                return;
+            visiting.add(path);
+            for (const rule of this.rules.filter(rule => rule.dependent === path)) {
+                visit(rule.source);
+            }
+            visiting.delete(path);
+            visited.add(path);
+            order.push(path);
+        };
+        for (const path of Object.keys(this.repositoryConfig).sort())
+            visit(path);
+        return order;
+    }
+    error(message) {
+        return new errors_1.ConfigurationError(message, 'release-dependencies', `${this.github.repository.owner}/${this.github.repository.repo}`);
+    }
+}
+exports.ReleaseDependencies = ReleaseDependencies;
+//# sourceMappingURL=release-dependencies.js.map
 
 /***/ }),
 
@@ -51845,6 +46705,14 @@ class BaseStrategy {
             this.logger.error(`Bad branch name: ${mergedPullRequest.headBranchName}`);
             return;
         }
+        const branchComponent = await this.getBranchComponent();
+        if (branchName.isComponent()) {
+            if (this.normalizeComponent(branchName.component) !==
+                this.normalizeComponent(branchComponent)) {
+                this.logger.info(`PR branch component: ${branchName.component} does not match configured branch component: ${branchComponent}`);
+                return;
+            }
+        }
         const pullRequestBody = await this.parsePullRequestBody(mergedPullRequest.body);
         if (!pullRequestBody) {
             this.logger.error('Could not parse pull request body as a release PR');
@@ -52322,6 +47190,97 @@ exports.Expo = Expo;
 
 /***/ }),
 
+/***/ 85694:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.GoLibrarian = void 0;
+const base_1 = __nccwpck_require__(95081);
+const changelog_1 = __nccwpck_require__(3325);
+const librarian_yaml_1 = __nccwpck_require__(18211);
+const version_1 = __nccwpck_require__(17348);
+const version_go_1 = __nccwpck_require__(54988);
+class GoLibrarian extends base_1.BaseStrategy {
+    constructor(options) {
+        var _a, _b;
+        options.changelogPath = (_a = options.changelogPath) !== null && _a !== void 0 ? _a : 'CHANGES.md';
+        super(options);
+        this.versionFile = (_b = options.versionFile) !== null && _b !== void 0 ? _b : 'internal/version.go';
+    }
+    async getComponent() {
+        const component = await super.getComponent();
+        if (component) {
+            const match = component.match(/^(.*)\/v[2-9]\d*$/);
+            if (match) {
+                return match[1];
+            }
+        }
+        return component;
+    }
+    async getBranchComponent() {
+        const component = await super.getBranchComponent();
+        return component ? component.replace(/\//g, '-') : undefined;
+    }
+    async buildUpdates(options) {
+        const updates = [];
+        const version = options.newVersion;
+        if (!this.skipChangelog) {
+            updates.push({
+                path: this.addPath(this.changelogPath),
+                createIfMissing: true,
+                updater: new changelog_1.Changelog({
+                    version,
+                    changelogEntry: options.changelogEntry,
+                }),
+            });
+        }
+        if (this.versionFile) {
+            updates.push({
+                path: this.addPath(this.versionFile),
+                createIfMissing: false,
+                updater: new version_go_1.VersionGo({
+                    version,
+                }),
+            });
+        }
+        updates.push({
+            path: 'librarian.yaml',
+            createIfMissing: false,
+            updater: new librarian_yaml_1.LibrarianYamlUpdater({
+                version,
+                packagePath: this.path,
+                component: this.component,
+            }),
+        });
+        return updates;
+    }
+    initialReleaseVersion() {
+        if (this.initialVersion) {
+            return version_1.Version.parse(this.initialVersion);
+        }
+        return version_1.Version.parse('0.1.0');
+    }
+}
+exports.GoLibrarian = GoLibrarian;
+//# sourceMappingURL=go-librarian.js.map
+
+/***/ }),
+
 /***/ 6492:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -52666,7 +47625,7 @@ const composite_1 = __nccwpck_require__(40911);
 const errors_1 = __nccwpck_require__(93637);
 const java_1 = __nccwpck_require__(46892);
 const java_update_1 = __nccwpck_require__(90276);
-const librarian_yaml_1 = __nccwpck_require__(72780);
+const librarian_yaml_1 = __nccwpck_require__(18211);
 const filter_commits_1 = __nccwpck_require__(26498);
 class JavaYoshiMonoRepo extends java_1.Java {
     /**
@@ -53233,13 +48192,16 @@ class Java extends base_1.BaseStrategy {
         this.snapshotLabels = options.snapshotLabels || manifest_1.DEFAULT_SNAPSHOT_LABELS;
         this.skipSnapshot = (_c = options.skipSnapshot) !== null && _c !== void 0 ? _c : false;
     }
-    async buildReleasePullRequest(commits, latestRelease, draft, labels = [], _bumpOnlyOptions) {
-        if (await this.needsSnapshot(commits, latestRelease)) {
+    async buildReleasePullRequest(commits, latestRelease, draft, labels = [], bumpOnlyOptions) {
+        // A dependency-forced release must produce its publishable version, not
+        // the usual preparatory SNAPSHOT candidate.
+        if (!bumpOnlyOptions &&
+            (await this.needsSnapshot(commits, latestRelease))) {
             this.logger.info('Repository needs a snapshot bump.');
             return await this.buildSnapshotPullRequest(latestRelease, draft, this.snapshotLabels);
         }
         this.logger.info('No Java snapshot needed');
-        return await super.buildReleasePullRequest(commits, latestRelease, draft, labels);
+        return await super.buildReleasePullRequest(commits, latestRelease, draft, labels, bumpOnlyOptions);
     }
     async buildSnapshotPullRequest(latestRelease, draft, labels = []) {
         const component = await this.getComponent();
@@ -53487,6 +48449,134 @@ exports.Maven = Maven;
 
 /***/ }),
 
+/***/ 30606:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.NodeLibrarian = void 0;
+const base_1 = __nccwpck_require__(95081);
+const changelog_json_1 = __nccwpck_require__(23719);
+const package_lock_json_1 = __nccwpck_require__(23443);
+const samples_package_json_1 = __nccwpck_require__(68530);
+const changelog_1 = __nccwpck_require__(3325);
+const package_json_1 = __nccwpck_require__(26588);
+const librarian_yaml_1 = __nccwpck_require__(18211);
+const errors_1 = __nccwpck_require__(93637);
+const filter_commits_1 = __nccwpck_require__(26498);
+class NodeLibrarian extends base_1.BaseStrategy {
+    async buildUpdates(options) {
+        var _a;
+        const updates = [];
+        const version = options.newVersion;
+        const versionsMap = options.versionsMap;
+        const packageName = (_a = (await this.getPackageName())) !== null && _a !== void 0 ? _a : '';
+        const lockFiles = ['package-lock.json', 'npm-shrinkwrap.json'];
+        lockFiles.forEach(lockFile => {
+            updates.push({
+                path: this.addPath(lockFile),
+                createIfMissing: false,
+                updater: new package_lock_json_1.PackageLockJson({
+                    version,
+                    versionsMap,
+                }),
+            });
+        });
+        updates.push({
+            path: this.addPath('samples/package.json'),
+            createIfMissing: false,
+            updater: new samples_package_json_1.SamplesPackageJson({
+                version,
+                packageName,
+            }),
+        });
+        !this.skipChangelog &&
+            updates.push({
+                path: this.addPath(this.changelogPath),
+                createIfMissing: true,
+                updater: new changelog_1.Changelog({
+                    version,
+                    changelogEntry: options.changelogEntry,
+                }),
+            });
+        updates.push({
+            path: this.addPath('package.json'),
+            createIfMissing: false,
+            cachedFileContents: this.pkgJsonContents,
+            updater: new package_json_1.PackageJson({
+                version,
+            }),
+        });
+        // If a machine readable changelog.json exists update it:
+        if (options.commits && packageName && !this.skipChangelog) {
+            const commits = (0, filter_commits_1.filterCommits)(options.commits, this.changelogSections);
+            updates.push({
+                path: 'changelog.json',
+                createIfMissing: false,
+                updater: new changelog_json_1.ChangelogJson({
+                    artifactName: packageName,
+                    version,
+                    commits,
+                    language: 'JAVASCRIPT',
+                }),
+            });
+        }
+        // Update librarian.yaml if this package exists within it.
+        updates.push({
+            path: 'librarian.yaml',
+            createIfMissing: false,
+            updater: new librarian_yaml_1.LibrarianYamlUpdater({
+                version,
+                packagePath: this.path,
+            }),
+        });
+        return updates;
+    }
+    async getDefaultPackageName() {
+        const pkgJsonContents = await this.getPkgJsonContents();
+        const pkg = JSON.parse(pkgJsonContents.parsedContent);
+        return pkg.name;
+    }
+    normalizeComponent(component) {
+        if (!component) {
+            return '';
+        }
+        return component.match(/^@[\w-]+\//) ? component.split('/')[1] : component;
+    }
+    async getPkgJsonContents() {
+        if (!this.pkgJsonContents) {
+            try {
+                this.pkgJsonContents = await this.github.getFileContentsOnBranch(this.addPath('package.json'), this.targetBranch);
+            }
+            catch (e) {
+                if (e instanceof errors_1.FileNotFoundError) {
+                    throw new errors_1.MissingRequiredFileError(this.addPath('package.json'), 'node', `${this.repository.owner}/${this.repository.repo}`);
+                }
+                throw e;
+            }
+        }
+        return this.pkgJsonContents;
+    }
+}
+exports.NodeLibrarian = NodeLibrarian;
+//# sourceMappingURL=node-librarian.js.map
+
+/***/ }),
+
 /***/ 78957:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -53698,6 +48788,48 @@ exports.OCaml = OCaml;
 
 /***/ }),
 
+/***/ 46692:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PHPLibrarian = void 0;
+const php_yoshi_1 = __nccwpck_require__(88460);
+const librarian_yaml_1 = __nccwpck_require__(18211);
+class PHPLibrarian extends php_yoshi_1.PHPYoshi {
+    async buildUpdates(options) {
+        const updates = await super.buildUpdates(options);
+        // Update librarian.yaml if this package exists within it.
+        updates.push({
+            path: 'librarian.yaml',
+            createIfMissing: false,
+            updater: new librarian_yaml_1.LibrarianYamlUpdater({
+                version: options.newVersion,
+                packagePath: this.path,
+            }),
+        });
+        return updates;
+    }
+}
+exports.PHPLibrarian = PHPLibrarian;
+//# sourceMappingURL=php-librarian.js.map
+
+/***/ }),
+
 /***/ 88460:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -53753,7 +48885,7 @@ class PHPYoshi extends base_1.BaseStrategy {
         });
     }
     async buildReleasePullRequest(commits, latestRelease, draft, labels = [], bumpOnlyOptions) {
-        var _a, _b, _c;
+        var _a, _b, _c, _d;
         const conventionalCommits = await this.postProcessCommits((0, commit_1.parseConventionalCommits)(commits, this.logger));
         if (!bumpOnlyOptions && conventionalCommits.length === 0) {
             this.logger.info(`No commits for path: ${this.path}, skipping`);
@@ -53766,9 +48898,9 @@ class PHPYoshi extends base_1.BaseStrategy {
                 versionOverrides[directory] = version;
             });
         });
-        const newVersion = latestRelease
+        const newVersion = (_a = bumpOnlyOptions === null || bumpOnlyOptions === void 0 ? void 0 : bumpOnlyOptions.newVersion) !== null && _a !== void 0 ? _a : (latestRelease
             ? await this.versioningStrategy.bump(latestRelease.tag.version, conventionalCommits)
-            : this.initialReleaseVersion();
+            : this.initialReleaseVersion());
         const cs = new commit_split_1.CommitSplit();
         const splitCommits = cs.split(conventionalCommits);
         const topLevelDirectories = Object.keys(splitCommits).sort();
@@ -53794,7 +48926,7 @@ class PHPYoshi extends base_1.BaseStrategy {
                     owner: this.repository.owner,
                     repository: this.repository.repo,
                     version: newVersion.toString(),
-                    previousTag: (_a = latestRelease === null || latestRelease === void 0 ? void 0 : latestRelease.tag) === null || _a === void 0 ? void 0 : _a.toString(),
+                    previousTag: (_b = latestRelease === null || latestRelease === void 0 ? void 0 : latestRelease.tag) === null || _b === void 0 ? void 0 : _b.toString(),
                     currentTag: newVersionTag.toString(),
                     targetBranch: this.targetBranch,
                     changelogSections: this.changelogSections,
@@ -53846,7 +48978,7 @@ class PHPYoshi extends base_1.BaseStrategy {
                     version,
                 }),
             });
-            if ((_c = (_b = componentInfo.composer.extra) === null || _b === void 0 ? void 0 : _b.component) === null || _c === void 0 ? void 0 : _c.entry) {
+            if ((_d = (_c = componentInfo.composer.extra) === null || _c === void 0 ? void 0 : _c.component) === null || _d === void 0 ? void 0 : _d.entry) {
                 updates.push({
                     path: this.addPath(`${directory}/${componentInfo.composer.extra.component.entry}`),
                     createIfMissing: false,
@@ -53875,11 +49007,21 @@ class PHPYoshi extends base_1.BaseStrategy {
         };
     }
     async parsePullRequestBody(pullRequestBody) {
+        var _a;
         const body = pull_request_body_1.PullRequestBody.parse(pullRequestBody, this.logger);
         if (!body) {
             return undefined;
         }
         const component = await this.getComponent();
+        // A manifest PR carries one version per component. The historical PHP
+        // aggregate PR instead starts its notes with a top-level version heading
+        // before the individual module details; keep its legacy parsing.
+        const notesSection = (_a = pullRequestBody
+            .replace(/\r\n/g, '\n')
+            .split('\n---\n')[1]) === null || _a === void 0 ? void 0 : _a.trimStart();
+        if (body.useComponents && !/^## \d+\.\d+\.\d+/.test(notesSection || '')) {
+            return body;
+        }
         const notes = body.releaseData
             .map(release => {
             var _a;
@@ -54040,6 +49182,48 @@ class PHP extends base_1.BaseStrategy {
 }
 exports.PHP = PHP;
 //# sourceMappingURL=php.js.map
+
+/***/ }),
+
+/***/ 48149:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PythonLibrarian = void 0;
+const python_1 = __nccwpck_require__(32109);
+const librarian_yaml_1 = __nccwpck_require__(18211);
+class PythonLibrarian extends python_1.Python {
+    async buildUpdates(options) {
+        const updates = await super.buildUpdates(options);
+        // Update librarian.yaml if this package exists within it.
+        updates.push({
+            path: 'librarian.yaml',
+            createIfMissing: false,
+            updater: new librarian_yaml_1.LibrarianYamlUpdater({
+                version: options.newVersion,
+                packagePath: this.path,
+            }),
+        });
+        return updates;
+    }
+}
+exports.PythonLibrarian = PythonLibrarian;
+//# sourceMappingURL=python-librarian.js.map
 
 /***/ }),
 
@@ -54296,6 +49480,48 @@ class R extends base_1.BaseStrategy {
 }
 exports.R = R;
 //# sourceMappingURL=r.js.map
+
+/***/ }),
+
+/***/ 79773:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.RubyLibrarian = void 0;
+const ruby_yoshi_1 = __nccwpck_require__(72294);
+const librarian_yaml_1 = __nccwpck_require__(18211);
+class RubyLibrarian extends ruby_yoshi_1.RubyYoshi {
+    async buildUpdates(options) {
+        const updates = await super.buildUpdates(options);
+        // Update librarian.yaml if this package exists within it.
+        updates.push({
+            path: 'librarian.yaml',
+            createIfMissing: false,
+            updater: new librarian_yaml_1.LibrarianYamlUpdater({
+                version: options.newVersion,
+                packagePath: this.path,
+            }),
+        });
+        return updates;
+    }
+}
+exports.RubyLibrarian = RubyLibrarian;
+//# sourceMappingURL=ruby-librarian.js.map
 
 /***/ }),
 
@@ -55960,7 +51186,7 @@ exports.VersionGo = void 0;
 const default_1 = __nccwpck_require__(69995);
 class VersionGo extends default_1.DefaultUpdater {
     updateContent(content) {
-        return content.replace(/const Version = "[0-9]+\.[0-9]+\.[0-9](-\w+)?"/, `const Version = "${this.version.toString()}"`);
+        return content.replace(/const Version = "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?"/, `const Version = "${this.version.toString()}"`);
     }
 }
 exports.VersionGo = VersionGo;
@@ -56166,94 +51392,6 @@ class JavaUpdate extends default_1.DefaultUpdater {
 }
 exports.JavaUpdate = JavaUpdate;
 //# sourceMappingURL=java-update.js.map
-
-/***/ }),
-
-/***/ 72780:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-// Copyright 2026 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.LibrarianYamlUpdater = void 0;
-const default_1 = __nccwpck_require__(69995);
-const yaml = __nccwpck_require__(44083);
-const logger_1 = __nccwpck_require__(68809);
-/**
- * Updates a librarian.yaml file.
- */
-class LibrarianYamlUpdater extends default_1.DefaultUpdater {
-    constructor() {
-        super(...arguments);
-        this.specialArtifacts = new Map([
-            ['google-cloud-java', 'google-cloud-java'],
-        ]);
-    }
-    /**
-     * Given initial file contents, return updated contents.
-     * @param {string} content The initial content
-     * @returns {string} The updated content
-     */
-    updateContent(content, logger = logger_1.logger) {
-        if (!this.versionsMap) {
-            logger.warn('missing versions map');
-            return content;
-        }
-        // Use yaml package to make sure librarian.yaml is not reformatted because
-        // we use different tool to format librarian.yaml.
-        const doc = yaml.parseDocument(content);
-        if (!doc || doc.errors.length > 0) {
-            logger.warn('Invalid yaml, cannot be parsed');
-            return content;
-        }
-        const libraries = doc.get('libraries');
-        if (!libraries || !yaml.isSeq(libraries)) {
-            return content;
-        }
-        let modified = false;
-        for (const library of libraries.items) {
-            if (!yaml.isMap(library))
-                continue;
-            const artifactID = this.findArtifactID(library.toJSON());
-            if (this.versionsMap.has(artifactID)) {
-                const newVersion = this.versionsMap.get(artifactID);
-                if (newVersion && library.get('version') !== newVersion.toString()) {
-                    library.set('version', newVersion.toString());
-                    modified = true;
-                }
-            }
-        }
-        if (modified) {
-            return doc.toString({ lineWidth: 0 });
-        }
-        return content;
-    }
-    findArtifactID(library) {
-        const artifact = this.specialArtifacts.get(library.name);
-        if (artifact) {
-            return artifact;
-        }
-        if (library.java && library.java.distribution_name_override) {
-            return library.java.distribution_name_override.split(':')[1];
-        }
-        return `google-cloud-${library.name}`;
-    }
-}
-exports.LibrarianYamlUpdater = LibrarianYamlUpdater;
-//# sourceMappingURL=librarian-yaml.js.map
 
 /***/ }),
 
@@ -56527,6 +51665,162 @@ class KRMBlueprintVersion extends default_1.DefaultUpdater {
 }
 exports.KRMBlueprintVersion = KRMBlueprintVersion;
 //# sourceMappingURL=krm-blueprint-version.js.map
+
+/***/ }),
+
+/***/ 18211:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.LibrarianYamlUpdater = void 0;
+const default_1 = __nccwpck_require__(69995);
+const yaml = __nccwpck_require__(44083);
+const logger_1 = __nccwpck_require__(68809);
+/**
+ * Updates a librarian.yaml file.
+ */
+class LibrarianYamlUpdater extends default_1.DefaultUpdater {
+    constructor(options) {
+        super(options);
+        this.specialArtifacts = new Map([
+            ['google-cloud-java', 'google-cloud-java'],
+            ['google-cloud-pom-parent', 'google-cloud-pom-parent'],
+        ]);
+        this.packagePath = options.packagePath;
+        this.component = options.component;
+    }
+    /**
+     * Given initial file contents, return updated contents.
+     * @param {string} content The initial content
+     * @returns {string} The updated content
+     */
+    updateContent(content, _logger = logger_1.logger) {
+        var _a;
+        const doc = yaml.parseDocument(content);
+        if (!doc || doc.errors.length > 0) {
+            throw new Error(`Invalid yaml, cannot be parsed: ${doc.errors
+                .map(e => e.message)
+                .join(', ')}`);
+        }
+        const libraries = doc.get('libraries');
+        if (!libraries || !yaml.isSeq(libraries)) {
+            return content;
+        }
+        let modified = false;
+        for (const library of libraries.items) {
+            if (!yaml.isMap(library))
+                continue;
+            const libraryJSON = library.toJSON();
+            let newVersion = undefined;
+            let isPreview = false;
+            if (this.versionsMap) {
+                // Multi-version (Java style)
+                const artifactID = this.findArtifactID(libraryJSON);
+                if (this.versionsMap.has(artifactID)) {
+                    newVersion = this.versionsMap.get(artifactID);
+                }
+            }
+            else {
+                // Single version (Go, Python, Node style)
+                const isGoPreviewMatch = this.packagePath &&
+                    this.packagePath === `preview/internal/${libraryJSON.name}`;
+                const isPythonPreviewMatch = this.packagePath &&
+                    this.packagePath === `preview-packages/${libraryJSON.name}`;
+                if (isGoPreviewMatch || isPythonPreviewMatch) {
+                    isPreview = true;
+                    newVersion = this.version;
+                }
+                else {
+                    const isGoMatch = (this.packagePath && libraryJSON.name === this.packagePath) ||
+                        ((!this.packagePath || this.packagePath === '.') &&
+                            this.component &&
+                            libraryJSON.name === this.component);
+                    const isPythonNodeMatch = this.packagePath &&
+                        this.deriveOutputDirectory(libraryJSON) === this.packagePath;
+                    if (isGoMatch || isPythonNodeMatch) {
+                        newVersion = this.version;
+                    }
+                }
+            }
+            if (newVersion) {
+                const newVersionStr = newVersion.toString();
+                if (isPreview) {
+                    const previewNode = this.getOrCreateSubsection(library, 'preview', doc);
+                    if (this.updateValue(previewNode, 'version', newVersionStr)) {
+                        modified = true;
+                    }
+                }
+                else {
+                    if (this.updateValue(library, 'version', newVersionStr)) {
+                        modified = true;
+                    }
+                    if (this.versionsMap) {
+                        // Multi-version (Java style): updates released_version for non-SNAPSHOTs
+                        const isSnapshot = !!((_a = newVersion.preRelease) === null || _a === void 0 ? void 0 : _a.includes('SNAPSHOT'));
+                        if (!isSnapshot) {
+                            const javaNode = this.getOrCreateSubsection(library, 'java', doc);
+                            if (this.updateValue(javaNode, 'released_version', newVersionStr)) {
+                                modified = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (modified) {
+            return doc.toString({ lineWidth: 0 });
+        }
+        return content;
+    }
+    deriveOutputDirectory(library) {
+        if (library.output) {
+            return library.output;
+        }
+        return `packages/${library.name}`;
+    }
+    findArtifactID(library) {
+        const artifact = this.specialArtifacts.get(library.name);
+        if (artifact) {
+            return artifact;
+        }
+        if (library.java && library.java.artifact_id) {
+            return library.java.artifact_id;
+        }
+        return `google-cloud-${library.name}`;
+    }
+    getOrCreateSubsection(parent, key, doc) {
+        let section = parent.get(key);
+        if (!yaml.isMap(section)) {
+            section = doc.createNode({});
+            parent.set(key, section);
+        }
+        return section;
+    }
+    updateValue(node, key, value) {
+        if (node.get(key) !== value) {
+            node.set(key, value);
+            return true;
+        }
+        return false;
+    }
+}
+exports.LibrarianYamlUpdater = LibrarianYamlUpdater;
+//# sourceMappingURL=librarian-yaml.js.map
 
 /***/ }),
 
@@ -58008,6 +53302,9 @@ class BranchName {
     toString() {
         return '';
     }
+    isComponent() {
+        return false;
+    }
 }
 exports.BranchName = BranchName;
 /**
@@ -58086,6 +53383,9 @@ class V12ComponentBranchName extends BranchName {
     toString() {
         return `${RELEASE_PLEASE}/branches/${this.targetBranch}/components/${this.component}`;
     }
+    isComponent() {
+        return true;
+    }
 }
 const DEFAULT_PATTERN = `^${RELEASE_PLEASE}--branches--(?<branch>.+)$`;
 class DefaultBranchName extends BranchName {
@@ -58119,6 +53419,9 @@ class ComponentBranchName extends BranchName {
     toString() {
         return `${RELEASE_PLEASE}--branches--${this.targetBranch}--components--${this.component}`;
     }
+    isComponent() {
+        return true;
+    }
 }
 const GROUP_PATTERN = `^${RELEASE_PLEASE}--branches--(?<branch>.+)--groups--(?<group>.+)$`;
 class GroupBranchName extends BranchName {
@@ -58144,6 +53447,757 @@ function safeBranchName(branchName) {
     return branchName.replace(/[^\w\d]/g, '-').replace(/-+/g, '-');
 }
 //# sourceMappingURL=branch-name.js.map
+
+/***/ }),
+
+/***/ 37478:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.addPullRequestDefaults = void 0;
+const DEFAULT_BRANCH_NAME = 'code-suggestions';
+const DEFAULT_PRIMARY_BRANCH = 'main';
+/**
+ * Add defaults to GitHub Pull Request options.
+ * Preserves the empty string.
+ * For ESCMAScript, null/undefined values are preserved for required fields.
+ * Recommended with an object validation function to check empty strings and incorrect types.
+ * @param {PullRequestUserOptions} options the user-provided github pull request options
+ * @returns {CreatePullRequest} git hub context with defaults applied
+ */
+function addPullRequestDefaults(options) {
+    const pullRequestSettings = {
+        upstreamOwner: options.upstreamOwner,
+        upstreamRepo: options.upstreamRepo,
+        description: options.description,
+        title: options.title,
+        message: options.message,
+        force: options.force || false,
+        branch: typeof options.branch === 'string' ? options.branch : DEFAULT_BRANCH_NAME,
+        primary: typeof options.primary === 'string'
+            ? options.primary
+            : DEFAULT_PRIMARY_BRANCH,
+        maintainersCanModify: options.maintainersCanModify === false ? false : true,
+        filesPerCommit: options.filesPerCommit,
+    };
+    return pullRequestSettings;
+}
+exports.addPullRequestDefaults = addPullRequestDefaults;
+//# sourceMappingURL=default-options-handler.js.map
+
+/***/ }),
+
+/***/ 99292:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.CommitError = void 0;
+class CommitError extends Error {
+    constructor(message, cause) {
+        super(message);
+        this.cause = cause;
+    }
+}
+exports.CommitError = CommitError;
+//# sourceMappingURL=errors.js.map
+
+/***/ }),
+
+/***/ 81621:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.branch = exports.createBranch = exports.existsBranchWithName = exports.getBranchHead = exports.createRef = void 0;
+const logger_1 = __nccwpck_require__(92235);
+const REF_PREFIX = 'refs/heads/';
+const DEFAULT_PRIMARY_BRANCH = 'main';
+/**
+ * Create a new branch reference with the ref prefix
+ * @param {string} branchName name of the branch
+ */
+function createRef(branchName) {
+    return REF_PREFIX + branchName;
+}
+exports.createRef = createRef;
+/**
+ * get branch commit HEAD SHA of a repository
+ * Throws an error if the branch cannot be found
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} origin The domain information of the remote origin repository
+ * @param {string} branch the name of the branch
+ * @returns {Promise<string>} branch commit HEAD SHA
+ */
+async function getBranchHead(octokit, origin, branch) {
+    const branchData = (await octokit.repos.getBranch({
+        owner: origin.owner,
+        repo: origin.repo,
+        branch,
+    })).data;
+    logger_1.logger.info(`Successfully found branch HEAD sha "${branchData.commit.sha}".`);
+    return branchData.commit.sha;
+}
+exports.getBranchHead = getBranchHead;
+/**
+ * Determine if there is a branch with the provided name in the remote GitHub repository
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} remote The domain information of the remote repository
+ * @param {string} name The branch name to create on the repository
+ * @returns {Promise<boolean>} if there is a branch already existing in the remote GitHub repository
+ */
+async function existsBranchWithName(octokit, remote, name) {
+    try {
+        const data = (await octokit.git.getRef({
+            owner: remote.owner,
+            repo: remote.repo,
+            ref: `heads/${name}`,
+        })).data;
+        return data.ref ? true : false;
+    }
+    catch (err) {
+        if (err.status === 404)
+            return false;
+        else
+            throw err;
+    }
+}
+exports.existsBranchWithName = existsBranchWithName;
+/**
+ * Create a branch on the remote repository if there is not an existing branch
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} remote The domain information of the remote origin repository
+ * @param {string} name The branch name to create on the origin repository
+ * @param {string} baseSha the sha that the base of the reference points to
+ * @param {boolean} duplicate whether there is an existing branch or not
+ * @returns {Promise<void>}
+ */
+async function createBranch(octokit, remote, name, baseSha, duplicate) {
+    if (!duplicate) {
+        const refData = (await octokit.git.createRef({
+            owner: remote.owner,
+            repo: remote.repo,
+            ref: createRef(name),
+            sha: baseSha,
+        })).data;
+        logger_1.logger.info(`Successfully created branch at ${refData.url}`);
+    }
+    else {
+        logger_1.logger.info('Skipping branch creation step...');
+    }
+}
+exports.createBranch = createBranch;
+/**
+ * Create a GitHub branch given a remote origin.
+ * Throws an exception if octokit fails, or if the base branch is invalid
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} origin The domain information of the remote origin repository
+ * @param {RepoDomain} upstream The domain information of the remote upstream repository
+ * @param {string} name The branch name to create on the origin repository
+ * @param {string} baseBranch the name of the branch to base the new branch off of. Default is main
+ * @returns {Promise<string>} the base SHA for subsequent commits to be based off for the origin branch
+ */
+async function branch(octokit, origin, upstream, name, baseBranch = DEFAULT_PRIMARY_BRANCH) {
+    // create branch from primary branch HEAD SHA
+    try {
+        const baseSha = await getBranchHead(octokit, upstream, baseBranch);
+        const duplicate = await existsBranchWithName(octokit, origin, name);
+        await createBranch(octokit, origin, name, baseSha, duplicate);
+        return baseSha;
+    }
+    catch (err) {
+        logger_1.logger.error('Error when creating branch');
+        throw err;
+    }
+}
+exports.branch = branch;
+//# sourceMappingURL=branch.js.map
+
+/***/ }),
+
+/***/ 5436:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.commitAndPush = exports.updateRef = exports.createTree = exports.generateTreeObjects = void 0;
+const logger_1 = __nccwpck_require__(92235);
+const create_commit_1 = __nccwpck_require__(11584);
+const errors_1 = __nccwpck_require__(99292);
+const DEFAULT_FILES_PER_COMMIT = 100;
+/**
+ * Generate and return a GitHub tree object structure
+ * containing the target change data
+ * See https://developer.github.com/v3/git/trees/#tree-object
+ * @param {Changes} changes the set of repository changes
+ * @returns {TreeObject[]} The new GitHub changes
+ */
+function generateTreeObjects(changes) {
+    const tree = [];
+    changes.forEach((fileData, path) => {
+        if (fileData.content === null) {
+            // if no file content then file is deleted
+            tree.push({
+                path,
+                mode: fileData.mode,
+                type: 'blob',
+                sha: null,
+            });
+        }
+        else {
+            // update file with its content
+            tree.push({
+                path,
+                mode: fileData.mode,
+                type: 'blob',
+                content: fileData.content,
+            });
+        }
+    });
+    return tree;
+}
+exports.generateTreeObjects = generateTreeObjects;
+function* inGroupsOf(all, groupSize) {
+    for (let i = 0; i < all.length; i += groupSize) {
+        yield all.slice(i, i + groupSize);
+    }
+}
+/**
+ * Upload and create a remote GitHub tree
+ * and resolves with the new tree SHA.
+ * Rejects if GitHub V3 API fails with the GitHub error response
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} origin the the remote repository to push changes to
+ * @param {string} refHead the base of the new commit(s)
+ * @param {TreeObject[]} tree the set of GitHub changes to upload
+ * @returns {Promise<string>} the GitHub tree SHA
+ * @throws {CommitError}
+ */
+async function createTree(octokit, origin, refHead, tree) {
+    const oldTreeSha = (await octokit.git.getCommit({
+        owner: origin.owner,
+        repo: origin.repo,
+        commit_sha: refHead,
+    })).data.tree.sha;
+    logger_1.logger.info('Got the latest commit tree');
+    try {
+        const treeSha = (await octokit.git.createTree({
+            owner: origin.owner,
+            repo: origin.repo,
+            tree,
+            base_tree: oldTreeSha,
+        })).data.sha;
+        logger_1.logger.info(`Successfully created a tree with the desired changes with SHA ${treeSha}`);
+        return treeSha;
+    }
+    catch (e) {
+        throw new errors_1.CommitError(`Error adding to tree: ${refHead}`, e);
+    }
+}
+exports.createTree = createTree;
+/**
+ * Update a reference to a SHA
+ * Rejects if GitHub V3 API fails with the GitHub error response
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {BranchDomain} origin the the remote branch to push changes to
+ * @param {string} newSha the ref to update the commit HEAD to
+ * @param {boolean} force to force the commit changes given refHead
+ * @returns {Promise<void>}
+ */
+async function updateRef(octokit, origin, newSha, force) {
+    logger_1.logger.info(`Updating reference heads/${origin.branch} to ${newSha}`);
+    try {
+        await octokit.git.updateRef({
+            owner: origin.owner,
+            repo: origin.repo,
+            ref: `heads/${origin.branch}`,
+            sha: newSha,
+            force,
+        });
+        logger_1.logger.info(`Successfully updated reference ${origin.branch} to ${newSha}`);
+    }
+    catch (e) {
+        throw new errors_1.CommitError(`Error updating ref heads/${origin.branch} to ${newSha}`, e);
+    }
+}
+exports.updateRef = updateRef;
+/**
+ * Given a set of changes, apply the commit(s) on top of the given branch's head and upload it to GitHub
+ * Rejects if GitHub V3 API fails with the GitHub error response
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {string} refHead the base of the new commit(s)
+ * @param {Changes} changes the set of repository changes
+ * @param {RepoDomain} origin the the remote repository to push changes to
+ * @param {string} originBranchName the remote branch that will contain the new changes
+ * @param {string} commitMessage the message of the new commit
+ * @param {boolean} force to force the commit changes given refHead
+ * @returns {Promise<void>}
+ * @throws {CommitError}
+ */
+async function commitAndPush(octokit, refHead, changes, originBranch, commitMessage, force, options) {
+    var _a;
+    const filesPerCommit = (_a = options === null || options === void 0 ? void 0 : options.filesPerCommit) !== null && _a !== void 0 ? _a : DEFAULT_FILES_PER_COMMIT;
+    const tree = generateTreeObjects(changes);
+    for (const treeGroup of inGroupsOf(tree, filesPerCommit)) {
+        const treeSha = await createTree(octokit, originBranch, refHead, treeGroup);
+        refHead = await (0, create_commit_1.createCommit)(octokit, originBranch, refHead, treeSha, commitMessage, options);
+    }
+    await updateRef(octokit, originBranch, refHead, force);
+}
+exports.commitAndPush = commitAndPush;
+//# sourceMappingURL=commit-and-push.js.map
+
+/***/ }),
+
+/***/ 11584:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.createCommit = void 0;
+const logger_1 = __nccwpck_require__(92235);
+const errors_1 = __nccwpck_require__(99292);
+/**
+ * Create a commit with a repo snapshot SHA on top of the reference HEAD
+ * and resolves with the SHA of the commit.
+ * Rejects if GitHub V3 API fails with the GitHub error response
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} origin the the remote repository to push changes to
+ * @param {string} refHead the base of the new commit(s)
+ * @param {string} treeSha the tree SHA that this commit will point to
+ * @param {string} message the message of the new commit
+ * @returns {Promise<string>} the new commit SHA
+ * @see https://docs.github.com/en/rest/git/commits?apiVersion=2022-11-28#create-a-commit
+ */
+async function createCommit(octokit, origin, refHead, treeSha, message, options = {}) {
+    try {
+        const signature = options.signer
+            ? await options.signer.generateSignature({
+                message,
+                tree: treeSha,
+                parents: [refHead],
+                author: options.author,
+                committer: options.committer,
+            })
+            : undefined;
+        const { data: { sha, url }, } = await octokit.git.createCommit({
+            owner: origin.owner,
+            repo: origin.repo,
+            message,
+            tree: treeSha,
+            parents: [refHead],
+            signature,
+            author: options.author,
+            committer: options.committer,
+        });
+        logger_1.logger.info(`Successfully created commit. See commit at ${url}`);
+        return sha;
+    }
+    catch (e) {
+        throw new errors_1.CommitError(`Error creating commit for: ${treeSha}`, e);
+    }
+}
+exports.createCommit = createCommit;
+//# sourceMappingURL=create-commit.js.map
+
+/***/ }),
+
+/***/ 30887:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.fork = void 0;
+const logger_1 = __nccwpck_require__(92235);
+/**
+ * Fork the GitHub owner's repository.
+ * Returns the fork owner and fork repo when the fork creation request to GitHub succeeds.
+ * Otherwise throws error.
+ *
+ * If fork already exists no new fork is created, no error occurs, and the existing Fork data is returned
+ * with the `updated_at` + any historical repo changes.
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} upstream upstream repository information
+ * @returns {Promise<RepoDomain>} the forked repository name, as well as the owner of that fork
+ */
+async function fork(octokit, upstream) {
+    try {
+        const forkedRepo = (await octokit.repos.createFork({
+            owner: upstream.owner,
+            repo: upstream.repo,
+        })).data;
+        const origin = {
+            repo: forkedRepo.name,
+            owner: forkedRepo.owner.login,
+        };
+        logger_1.logger.info(`Create fork request was successful for ${origin.owner}/${origin.repo}`);
+        return origin;
+    }
+    catch (err) {
+        logger_1.logger.error('Error when forking');
+        throw err;
+    }
+}
+exports.fork = fork;
+//# sourceMappingURL=fork.js.map
+
+/***/ }),
+
+/***/ 46498:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.addLabels = void 0;
+const logger_1 = __nccwpck_require__(92235);
+/**
+ * Create a GitHub PR on the upstream organization's repo
+ * Throws an error if the GitHub API fails
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} upstream The upstream repository
+ * @param {BranchDomain} origin The remote origin information that contains the origin branch
+ * @param {number} issue_number The issue number to add labels to. Can also be a PR number
+ * @param {string[]} labels The list of labels to apply to the newly created PR. Default is []. the funciton will no-op.
+ * @returns {Promise<string[]>} The list of resulting labels after the addition of the given labels
+ */
+async function addLabels(octokit, upstream, origin, issue_number, labels) {
+    if (!labels || labels.length === 0) {
+        return [];
+    }
+    const labelsResponseData = (await octokit.issues.addLabels({
+        owner: upstream.owner,
+        repo: origin.repo,
+        issue_number: issue_number,
+        labels: labels,
+    })).data;
+    logger_1.logger.info(`Successfully added labels ${labels} to issue: ${issue_number}`);
+    return labelsResponseData.map(l => l.name);
+}
+exports.addLabels = addLabels;
+//# sourceMappingURL=labels.js.map
+
+/***/ }),
+
+/***/ 75220:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.openPullRequest = void 0;
+const logger_1 = __nccwpck_require__(92235);
+const DEFAULT_PRIMARY = 'main';
+/**
+ * Create a GitHub PR on the upstream organization's repo
+ * Throws an error if the GitHub API fails
+ * @param {Octokit} octokit The authenticated octokit instance
+ * @param {RepoDomain} upstream The upstream repository
+ * @param {BranchDomain} origin The remote origin information that contains the origin branch
+ * @param {Description} description The pull request title and detailed description
+ * @param {boolean} maintainersCanModify Whether or not maintainers can modify the pull request. Default is true
+ * @param {string} upstreamPrimary The upstream repository's primary branch. Default is main.
+ * @param draft Open a DRAFT pull request.  Defaults to false.
+ * @returns {Promise<void>}
+ */
+async function openPullRequest(octokit, upstream, origin, description, maintainersCanModify = true, upstreamPrimary = DEFAULT_PRIMARY, draft = false) {
+    const head = `${origin.owner}:${origin.branch}`;
+    const existingPullRequest = (await octokit.pulls.list({
+        owner: upstream.owner,
+        repo: origin.repo,
+        head,
+    })).data.find(pr => pr.head.label === head);
+    if (existingPullRequest) {
+        logger_1.logger.info(`Found existing pull request for reference ${origin.owner}:${origin.branch}. Skipping creating a new pull request.`);
+        return existingPullRequest.number;
+    }
+    const pullResponseData = (await octokit.pulls.create({
+        owner: upstream.owner,
+        repo: origin.repo,
+        title: description.title,
+        head: `${origin.owner}:${origin.branch}`,
+        base: upstreamPrimary,
+        body: description.body,
+        maintainer_can_modify: maintainersCanModify,
+        draft: draft,
+    })).data;
+    logger_1.logger.info(`Successfully opened pull request available at url: ${pullResponseData.url}.`);
+    return pullResponseData.number;
+}
+exports.openPullRequest = openPullRequest;
+//# sourceMappingURL=open-pull-request.js.map
+
+/***/ }),
+
+/***/ 44611:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.createPullRequest = void 0;
+const logger_1 = __nccwpck_require__(92235);
+const default_options_handler_1 = __nccwpck_require__(37478);
+const retry = __nccwpck_require__(33415);
+const branch_1 = __nccwpck_require__(81621);
+const fork_1 = __nccwpck_require__(30887);
+const commit_and_push_1 = __nccwpck_require__(5436);
+const open_pull_request_1 = __nccwpck_require__(75220);
+const labels_1 = __nccwpck_require__(46498);
+/**
+ * Make a new GitHub Pull Request with a set of changes applied on top of primary branch HEAD.
+ * The changes are committed into a new branch based on the upstream repository options using the authenticated Octokit account.
+ * Then a Pull Request is made from that branch.
+ *
+ * Also throws error if git data from the fork is not ready in 5 minutes.
+ *
+ * From the docs
+ * https://developer.github.com/v3/repos/forks/#create-a-fork
+ * """
+ * Forking a Repository happens asynchronously.
+ * You may have to wait a short period of time before you can access the git objects.
+ * If this takes longer than 5 minutes, be sure to contact GitHub Support or GitHub Premium Support.
+ * """
+ *
+ * If changes are empty then the workflow will not run.
+ * Rethrows an HttpError if Octokit GitHub API returns an error. HttpError Octokit access_token and client_secret headers redact all sensitive information.
+ * @param {Octokit} octokit The authenticated octokit instance, instantiated with an access token having permissiong to create a fork on the target repository
+ * @param {Changes | null | undefined} changes A set of changes. The changes may be empty
+ * @param {CreatePullRequestUserOptions} options The configuration for interacting with GitHub provided by the user.
+ * @returns {Promise<number>} the pull request number. Returns 0 if unsuccessful.
+ * @throws {CommitError} on failure during commit process
+ */
+async function createPullRequest(octokit, changes, options) {
+    (0, logger_1.setupLogger)(options.logger);
+    // if null undefined, or the empty map then no changes have been provided.
+    // Do not execute GitHub workflow
+    if (changes === null || changes === undefined || changes.size === 0) {
+        logger_1.logger.info('Empty change set provided. No changes need to be made. Cancelling workflow.');
+        return 0;
+    }
+    const gitHubConfigs = (0, default_options_handler_1.addPullRequestDefaults)(options);
+    logger_1.logger.info('Starting GitHub PR workflow...');
+    const upstream = {
+        owner: gitHubConfigs.upstreamOwner,
+        repo: gitHubConfigs.upstreamRepo,
+    };
+    const origin = options.fork === false ? upstream : await (0, fork_1.fork)(octokit, upstream);
+    if (options.fork) {
+        // try to sync the fork
+        await retry(async () => await octokit.repos.mergeUpstream({
+            owner: origin.owner,
+            repo: origin.repo,
+            branch: gitHubConfigs.primary,
+        }), {
+            retries: options.retry,
+            factor: 2.8411,
+            minTimeout: 3000,
+            randomize: false,
+            onRetry: (e, attempt) => {
+                e.message = `Error creating syncing upstream: ${e.message}`;
+                logger_1.logger.error(e);
+                logger_1.logger.info(`Retry attempt #${attempt}...`);
+            },
+        });
+    }
+    const originBranch = {
+        ...origin,
+        branch: gitHubConfigs.branch,
+    };
+    // The `retry` flag defaults to `5` to maintain compatibility
+    options.retry = options.retry === undefined ? 5 : options.retry;
+    const refHeadSha = await retry(async () => await (0, branch_1.branch)(octokit, origin, upstream, originBranch.branch, gitHubConfigs.primary), {
+        retries: options.retry,
+        factor: 2.8411,
+        minTimeout: 3000,
+        randomize: false,
+        onRetry: (e, attempt) => {
+            e.message = `Error creating Pull Request: ${e.message}`;
+            logger_1.logger.error(e);
+            logger_1.logger.info(`Retry attempt #${attempt}...`);
+        },
+    });
+    await (0, commit_and_push_1.commitAndPush)(octokit, refHeadSha, changes, originBranch, gitHubConfigs.message, gitHubConfigs.force, options);
+    const description = {
+        body: gitHubConfigs.description,
+        title: gitHubConfigs.title,
+    };
+    const prNumber = await (0, open_pull_request_1.openPullRequest)(octokit, upstream, originBranch, description, gitHubConfigs.maintainersCanModify, gitHubConfigs.primary, options.draft);
+    logger_1.logger.info(`Successfully opened pull request: ${prNumber}.`);
+    // addLabels will no-op if options.labels is undefined or empty.
+    await (0, labels_1.addLabels)(octokit, upstream, originBranch, prNumber, options.labels);
+    return prNumber;
+}
+exports.createPullRequest = createPullRequest;
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 92235:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.setupLogger = exports.logger = void 0;
+class NullLogger {
+    constructor() {
+        this.error = () => { };
+        this.warn = () => { };
+        this.info = () => { };
+        this.debug = () => { };
+        this.trace = () => { };
+    }
+}
+let logger = new NullLogger();
+exports.logger = logger;
+function setupLogger(userLogger) {
+    if (userLogger) {
+        exports.logger = logger = userLogger;
+    }
+    else {
+        exports.logger = logger = new NullLogger();
+    }
+}
+exports.setupLogger = setupLogger;
+//# sourceMappingURL=logger.js.map
 
 /***/ }),
 
@@ -58830,10 +54884,10 @@ function generateMatchPattern(pullRequestTitlePattern, componentNoSpace, logger 
         pullRequestTitlePattern.search(/\$\{version\}/) === -1)
         logger.warn("pullRequestTitlePattern miss the part of '${version}'");
     return new RegExp(`^${(pullRequestTitlePattern || DEFAULT_PR_TITLE_PATTERN)
-        .replace('[', '\\[') // TODO: handle all regex escaping
-        .replace(']', '\\]')
-        .replace('(', '\\(')
-        .replace(')', '\\)')
+        .replace(/\[/g, '\\[') // TODO: handle all regex escaping
+        .replace(/\]/g, '\\]')
+        .replace(/\(/g, '\\(')
+        .replace(/\)/g, '\\)')
         .replace('${scope}', '(\\((?<branch>[\\w-./]+)\\))?')
         .replace('${component}', componentNoSpace === true
         ? '?(?<component>@?[\\w-./]*)?'
@@ -95025,14 +91079,6 @@ module.exports = require("buffer");
 
 /***/ }),
 
-/***/ 32081:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("child_process");
-
-/***/ }),
-
 /***/ 96206:
 /***/ ((module) => {
 
@@ -95254,6 +91300,2658 @@ module.exports = require("worker_threads");
 
 "use strict";
 module.exports = require("zlib");
+
+/***/ }),
+
+/***/ 24081:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.range = exports.balanced = void 0;
+const balanced = (a, b, str) => {
+    const ma = a instanceof RegExp ? maybeMatch(a, str) : a;
+    const mb = b instanceof RegExp ? maybeMatch(b, str) : b;
+    const r = ma !== null && mb != null && (0, exports.range)(ma, mb, str);
+    return (r && {
+        start: r[0],
+        end: r[1],
+        pre: str.slice(0, r[0]),
+        body: str.slice(r[0] + ma.length, r[1]),
+        post: str.slice(r[1] + mb.length),
+    });
+};
+exports.balanced = balanced;
+const maybeMatch = (reg, str) => {
+    const m = str.match(reg);
+    return m ? m[0] : null;
+};
+const range = (a, b, str) => {
+    let begs, beg, left, right = undefined, result;
+    let ai = str.indexOf(a);
+    let bi = str.indexOf(b, ai + 1);
+    let i = ai;
+    if (ai >= 0 && bi > 0) {
+        if (a === b) {
+            return [ai, bi];
+        }
+        begs = [];
+        left = str.length;
+        while (i >= 0 && !result) {
+            if (i === ai) {
+                begs.push(i);
+                ai = str.indexOf(a, i + 1);
+            }
+            else if (begs.length === 1) {
+                const r = begs.pop();
+                if (r !== undefined)
+                    result = [r, bi];
+            }
+            else {
+                beg = begs.pop();
+                if (beg !== undefined && beg < left) {
+                    left = beg;
+                    right = bi;
+                }
+                bi = str.indexOf(b, i + 1);
+            }
+            i = ai < bi && ai >= 0 ? ai : bi;
+        }
+        if (begs.length && right !== undefined) {
+            result = [left, right];
+        }
+    }
+    return result;
+};
+exports.range = range;
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 292:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.EXPANSION_MAX_REWRITES = exports.EXPANSION_MAX_DEPTH = exports.EXPANSION_MAX_LENGTH = exports.EXPANSION_MAX = void 0;
+exports.expand = expand;
+const balanced_match_1 = __nccwpck_require__(24081);
+const escSlash = '\0SLASH' + Math.random() + '\0';
+const escOpen = '\0OPEN' + Math.random() + '\0';
+const escClose = '\0CLOSE' + Math.random() + '\0';
+const escComma = '\0COMMA' + Math.random() + '\0';
+const escPeriod = '\0PERIOD' + Math.random() + '\0';
+const escSlashPattern = new RegExp(escSlash, 'g');
+const escOpenPattern = new RegExp(escOpen, 'g');
+const escClosePattern = new RegExp(escClose, 'g');
+const escCommaPattern = new RegExp(escComma, 'g');
+const escPeriodPattern = new RegExp(escPeriod, 'g');
+const slashPattern = /\\\\/g;
+const openPattern = /\\{/g;
+const closePattern = /\\}/g;
+const commaPattern = /\\,/g;
+const periodPattern = /\\\./g;
+exports.EXPANSION_MAX = 100_000;
+// `EXPANSION_MAX` caps the *number* of expansions, but not their length. An
+// input like `'{a,b}'.repeat(1500)` stays under that count - its output is
+// truncated to 100k results - while making every result ~1500 characters
+// long. The result set, and the intermediate arrays built while combining
+// brace sets, then grow large enough to exhaust memory and crash the process
+// (CVE-2026-14257). `EXPANSION_MAX_LENGTH` bounds the total number of
+// characters the accumulator may hold at any point, so memory stays flat no
+// matter how many brace groups are chained. The limit sits well above any
+// realistic expansion (100k results hitting `EXPANSION_MAX` measure ~1M
+// characters) so legitimate input is unaffected.
+exports.EXPANSION_MAX_LENGTH = 4_000_000;
+// `expand_` recurses once per level of brace *nesting* - both when expanding a
+// set's comma members and when re-wrapping a set whose body is a single part.
+// The CVE-2026-14257 fix made the *tail* iterative (recursion on `m.post`, one
+// level per chained group), which left nesting depth unbounded: about 3,100
+// levels of `{{{...a,b...}}}` - only ~6KB of input - exhausted the native stack
+// and crashed the process. `EXPANSION_MAX_DEPTH` bounds how deep the parser
+// will follow nesting. It sits far above any realistic pattern and well below
+// the depth at which the stack runs out.
+exports.EXPANSION_MAX_DEPTH = 1_000;
+// Bash keeps a quirk where a brace group followed by a comma set still expands
+// (`{a},b}`). The parser implements it by rewriting the string and restarting
+// the scan, absorbing one `}` per pass. `n` trailing braces therefore cost `n`
+// full passes over a string that itself grows by one `escClose` sentinel each
+// time - quadratic in `n`, with a ~26x constant from the sentinel's length.
+// 128KB of `'{a}' + '}'.repeat(n) + ',z}'` blocked the event loop for 27
+// seconds to produce two results. `EXPANSION_MAX_REWRITES` bounds how many
+// times the scan may restart. Real `{a},b}` input needs a handful.
+exports.EXPANSION_MAX_REWRITES = 1_000;
+function numeric(str) {
+    return !isNaN(str) ? parseInt(str, 10) : str.charCodeAt(0);
+}
+function escapeBraces(str) {
+    return str
+        .replace(slashPattern, escSlash)
+        .replace(openPattern, escOpen)
+        .replace(closePattern, escClose)
+        .replace(commaPattern, escComma)
+        .replace(periodPattern, escPeriod);
+}
+function unescapeBraces(str) {
+    return str
+        .replace(escSlashPattern, '\\')
+        .replace(escOpenPattern, '{')
+        .replace(escClosePattern, '}')
+        .replace(escCommaPattern, ',')
+        .replace(escPeriodPattern, '.');
+}
+// Like `target.push(...items)` but doesn't overflow the stack
+function pushAll(target, items) {
+    for (let i = 0; i < items.length; i++) {
+        target.push(items[i]);
+    }
+}
+/**
+ * Basically just str.split(","), but handling cases
+ * where we have nested braced sections, which should be
+ * treated as individual members, like {a,{b,c},d}
+ */
+function parseCommaParts(str) {
+    const parts = [];
+    // Walk the brace groups iteratively. Recursing on `post` once per group let a
+    // chain of them exhaust the stack - the parsing-side counterpart to
+    // the `expand_` overflow fixed for CVE-2026-14257, and not something `max` or
+    // `maxLength` can bound, since it happens before expansion.
+    //
+    // The part the next chunk continues
+    let carry = '';
+    for (;;) {
+        const m = (0, balanced_match_1.balanced)('{', '}', str);
+        if (!m) {
+            const tail = str.split(',');
+            tail[0] = carry + tail[0];
+            pushAll(parts, tail);
+            return parts;
+        }
+        const { pre, body, post } = m;
+        const p = pre.split(',');
+        p[0] = carry + p[0];
+        p[p.length - 1] += '{' + body + '}';
+        if (!post.length) {
+            pushAll(parts, p);
+            return parts;
+        }
+        carry = p.pop();
+        pushAll(parts, p);
+        str = post;
+    }
+}
+function expand(str, options = {}) {
+    if (!str) {
+        return [];
+    }
+    const { max = exports.EXPANSION_MAX, maxLength = exports.EXPANSION_MAX_LENGTH, maxDepth = exports.EXPANSION_MAX_DEPTH, maxRewrites = exports.EXPANSION_MAX_REWRITES, } = options;
+    // I don't know why Bash 4.3 does this, but it does.
+    // Anything starting with {} will have the first two bytes preserved
+    // but *only* at the top level, so {},a}b will not expand to anything,
+    // but a{},b}c will be expanded to [a}c,abc].
+    // One could argue that this is a bug in Bash, but since the goal of
+    // this module is to match Bash's rules, we escape a leading {}
+    if (str.slice(0, 2) === '{}') {
+        str = '\\{\\}' + str.slice(2);
+    }
+    return expand_(escapeBraces(str), max, maxLength, maxDepth, 0, maxRewrites, true).map(unescapeBraces);
+}
+function embrace(str) {
+    return '{' + str + '}';
+}
+function isPadded(el) {
+    return /^-?0\d/.test(el);
+}
+function lte(i, y) {
+    return i <= y;
+}
+function gte(i, y) {
+    return i >= y;
+}
+// Build `{ acc[a] + pre + values[v] }` for every combination, capping the
+// number of results at `max` and the total number of characters at `maxLength`.
+// This is the one place output grows, so bounding it here keeps the single
+// accumulator - and therefore memory - flat regardless of how many brace groups
+// are combined (CVE-2026-14257).
+function combine(acc, pre, values, max, maxLength, dropEmpties) {
+    const out = [];
+    let length = 0;
+    for (let a = 0; a < acc.length; a++) {
+        for (let v = 0; v < values.length; v++) {
+            if (out.length >= max)
+                return out;
+            const expansion = acc[a] + pre + values[v];
+            // Bash drops empty results at the top level. Skip them before they count
+            // against `max`, so `max` bounds the number of *kept* results.
+            if (dropEmpties && !expansion)
+                continue;
+            if (length + expansion.length > maxLength)
+                return out;
+            out.push(expansion);
+            length += expansion.length;
+        }
+    }
+    return out;
+}
+// The expansion values of a single numeric (`1..5`) or alphabetic (`a..e..2`)
+// sequence body.
+function expandSequence(body, isAlphaSequence, max, maxLength) {
+    const n = body.split(/\.\./);
+    const N = [];
+    // A sequence body always splits into two or three parts, but the compiler
+    // can't know that.
+    /* c8 ignore start */
+    if (n[0] === undefined || n[1] === undefined) {
+        return N;
+    }
+    /* c8 ignore stop */
+    const x = numeric(n[0]);
+    const y = numeric(n[1]);
+    const width = Math.max(n[0].length, n[1].length);
+    let incr = n.length === 3 && n[2] !== undefined ?
+        Math.max(Math.abs(numeric(n[2])), 1)
+        : 1;
+    let test = lte;
+    const reverse = y < x;
+    if (reverse) {
+        incr *= -1;
+        test = gte;
+    }
+    const pad = n.some(isPadded);
+    let length = 0;
+    for (let i = x; test(i, y) && N.length < max; i += incr) {
+        let c;
+        if (isAlphaSequence) {
+            c = String.fromCharCode(i);
+            if (c === '\\') {
+                c = '';
+            }
+        }
+        else {
+            c = String(i);
+            if (pad) {
+                const need = width - c.length;
+                if (need > 0) {
+                    const z = new Array(need + 1).join('0');
+                    if (i < 0) {
+                        c = '-' + z + c.slice(1);
+                    }
+                    else {
+                        c = z + c;
+                    }
+                }
+            }
+        }
+        if (length + c.length > maxLength)
+            break;
+        N.push(c);
+        length += c.length;
+    }
+    return N;
+}
+function expand_(str, max, maxLength, maxDepth, depth, maxRewrites, isTop) {
+    // Too deeply nested to keep following: treat the rest as literal, the same
+    // way a group that cannot expand is already handled. Truncating rather than
+    // throwing keeps `expand` total, matching `max` and `maxLength`.
+    if (depth > maxDepth) {
+        return [str];
+    }
+    // Consume the string's top-level brace groups left to right, threading a
+    // running set of combined prefixes (`acc`). Expanding the tail iteratively -
+    // rather than recursing on `m.post` once per group - keeps the native stack
+    // depth constant, so deeply chained input (`'{a,b}'.repeat(3000)`) can no
+    // longer overflow the stack, and leaves a single accumulator whose size
+    // `maxLength` bounds directly (CVE-2026-14257).
+    let acc = [''];
+    // Bash drops empty results, but only when the *first* top-level group is a
+    // comma set - a sequence like `{a..\}` may legitimately yield ''. The drop
+    // is on the final strings, so it is applied to whichever `combine` produces
+    // them (the one with no brace set left in the tail).
+    // How many times the `{a},b}` rewrite below has restarted the scan. Each pass
+    // re-reads the whole string, so leaving this unbounded is quadratic.
+    let rewrites = 0;
+    let dropEmpties = false;
+    let firstGroup = true;
+    for (;;) {
+        const m = (0, balanced_match_1.balanced)('{', '}', str);
+        // No brace set left: the rest of the string is literal.
+        if (!m) {
+            return combine(acc, str, [''], max, maxLength, dropEmpties);
+        }
+        // no need to expand pre, since it is guaranteed to be free of brace-sets
+        const pre = m.pre;
+        if (/\$$/.test(pre)) {
+            acc = combine(acc, pre + '{' + m.body + '}', [''], max, maxLength, dropEmpties && !m.post.length);
+            firstGroup = false;
+            if (!m.post.length)
+                break;
+            str = m.post;
+            continue;
+        }
+        const isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
+        const isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
+        const isSequence = isNumericSequence || isAlphaSequence;
+        const isOptions = m.body.indexOf(',') >= 0;
+        if (!isSequence && !isOptions) {
+            // {a},b}
+            if (rewrites < maxRewrites && m.post.match(/,(?!,).*\}/)) {
+                rewrites++;
+                str = m.pre + '{' + m.body + escClose + m.post;
+                isTop = true;
+                continue;
+            }
+            // Nothing here expands, so the whole remaining string is literal.
+            return combine(acc, pre + '{' + m.body + '}' + m.post, [''], max, maxLength, dropEmpties);
+        }
+        if (firstGroup) {
+            dropEmpties = isTop && !isSequence;
+            firstGroup = false;
+        }
+        let values;
+        if (isSequence) {
+            values = expandSequence(m.body, isAlphaSequence, max, maxLength);
+        }
+        else {
+            let n = parseCommaParts(m.body);
+            if (n.length === 1 && n[0] !== undefined) {
+                // x{{a,b}}y ==> x{a}y x{b}y
+                n = expand_(n[0], max, maxLength, maxDepth, depth + 1, maxRewrites, false).map(embrace);
+                //XXX is this necessary? Can't seem to hit it in tests.
+                /* c8 ignore start */
+                if (n.length === 1) {
+                    acc = combine(acc, pre + n[0], [''], max, maxLength, dropEmpties && !m.post.length);
+                    if (!m.post.length)
+                        break;
+                    str = m.post;
+                    continue;
+                }
+                /* c8 ignore stop */
+            }
+            // Values that `combine` is going to drop as empty produce no result, so
+            // they must not count against `max` - otherwise `{a,,b}` with `max: 2`
+            // would stop at `['a', '']` and yield one result instead of two. Skipping
+            // them outright keeps `values` bounded while leaving `max` a bound on
+            // *kept* results.
+            let dropsEmpties = dropEmpties && !m.post.length && !pre;
+            for (let d = 0; dropsEmpties && d < acc.length; d++) {
+                if (acc[d]) {
+                    dropsEmpties = false;
+                }
+            }
+            values = [];
+            let valuesLength = 0;
+            outer: for (let j = 0; j < n.length; j++) {
+                const expanded = expand_(n[j], max, maxLength, maxDepth, depth + 1, maxRewrites, false);
+                for (let k = 0; k < expanded.length; k++) {
+                    const v = expanded[k];
+                    if (dropsEmpties && !v)
+                        continue;
+                    if (values.length >= max ||
+                        valuesLength + v.length > maxLength) {
+                        break outer;
+                    }
+                    values.push(v);
+                    valuesLength += v.length;
+                }
+            }
+        }
+        acc = combine(acc, pre, values, max, maxLength, dropEmpties && !m.post.length);
+        if (!m.post.length)
+            break;
+        str = m.post;
+    }
+    return acc;
+}
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 18394:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.assertValidPattern = void 0;
+const MAX_PATTERN_LENGTH = 1024 * 64;
+const assertValidPattern = (pattern) => {
+    if (typeof pattern !== 'string') {
+        throw new TypeError('invalid pattern');
+    }
+    if (pattern.length > MAX_PATTERN_LENGTH) {
+        throw new TypeError('pattern is too long');
+    }
+};
+exports.assertValidPattern = assertValidPattern;
+//# sourceMappingURL=assert-valid-pattern.js.map
+
+/***/ }),
+
+/***/ 29530:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+// parse a single path portion
+var _a;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.AST = void 0;
+const brace_expressions_js_1 = __nccwpck_require__(77576);
+const unescape_js_1 = __nccwpck_require__(49850);
+const types = new Set(['!', '?', '+', '*', '@']);
+const isExtglobType = (c) => types.has(c);
+const isExtglobAST = (c) => isExtglobType(c.type);
+// Map of which extglob types can adopt the children of a nested extglob
+//
+// anything but ! can adopt a matching type:
+// +(a|+(b|c)|d) => +(a|b|c|d)
+// *(a|*(b|c)|d) => *(a|b|c|d)
+// @(a|@(b|c)|d) => @(a|b|c|d)
+// ?(a|?(b|c)|d) => ?(a|b|c|d)
+//
+// * can adopt anything, because 0 or repetition is allowed
+// *(a|?(b|c)|d) => *(a|b|c|d)
+// *(a|+(b|c)|d) => *(a|b|c|d)
+// *(a|@(b|c)|d) => *(a|b|c|d)
+//
+// + can adopt @, because 1 or repetition is allowed
+// +(a|@(b|c)|d) => +(a|b|c|d)
+//
+// + and @ CANNOT adopt *, because 0 would be allowed
+// +(a|*(b|c)|d) => would match "", on *(b|c)
+// @(a|*(b|c)|d) => would match "", on *(b|c)
+//
+// + and @ CANNOT adopt ?, because 0 would be allowed
+// +(a|?(b|c)|d) => would match "", on ?(b|c)
+// @(a|?(b|c)|d) => would match "", on ?(b|c)
+//
+// ? can adopt @, because 0 or 1 is allowed
+// ?(a|@(b|c)|d) => ?(a|b|c|d)
+//
+// ? and @ CANNOT adopt * or +, because >1 would be allowed
+// ?(a|*(b|c)|d) => would match bbb on *(b|c)
+// @(a|*(b|c)|d) => would match bbb on *(b|c)
+// ?(a|+(b|c)|d) => would match bbb on +(b|c)
+// @(a|+(b|c)|d) => would match bbb on +(b|c)
+//
+// ! CANNOT adopt ! (nothing else can either)
+// !(a|!(b|c)|d) => !(a|b|c|d) would fail to match on b (not not b|c)
+//
+// ! can adopt @
+// !(a|@(b|c)|d) => !(a|b|c|d)
+//
+// ! CANNOT adopt *
+// !(a|*(b|c)|d) => !(a|b|c|d) would match on bbb, not allowed
+//
+// ! CANNOT adopt +
+// !(a|+(b|c)|d) => !(a|b|c|d) would match on bbb, not allowed
+//
+// ! CANNOT adopt ?
+// x!(a|?(b|c)|d) => x!(a|b|c|d) would fail to match "x"
+const adoptionMap = new Map([
+    ['!', ['@']],
+    ['?', ['?', '@']],
+    ['@', ['@']],
+    ['*', ['*', '+', '?', '@']],
+    ['+', ['+', '@']],
+]);
+// nested extglobs that can be adopted in, but with the addition of
+// a blank '' element.
+const adoptionWithSpaceMap = new Map([
+    ['!', ['?']],
+    ['@', ['?']],
+    ['+', ['?', '*']],
+]);
+// union of the previous two maps
+const adoptionAnyMap = new Map([
+    ['!', ['?', '@']],
+    ['?', ['?', '@']],
+    ['@', ['?', '@']],
+    ['*', ['*', '+', '?', '@']],
+    ['+', ['+', '@', '?', '*']],
+]);
+// Extglobs that can take over their parent if they are the only child
+// the key is parent, value maps child to resulting extglob parent type
+// '@' is omitted because it's a special case. An `@` extglob with a single
+// member can always be usurped by that subpattern.
+const usurpMap = new Map([
+    ['!', new Map([['!', '@']])],
+    [
+        '?',
+        new Map([
+            ['*', '*'],
+            ['+', '*'],
+        ]),
+    ],
+    [
+        '@',
+        new Map([
+            ['!', '!'],
+            ['?', '?'],
+            ['@', '@'],
+            ['*', '*'],
+            ['+', '+'],
+        ]),
+    ],
+    [
+        '+',
+        new Map([
+            ['?', '*'],
+            ['*', '*'],
+        ]),
+    ],
+]);
+// Patterns that get prepended to bind to the start of either the
+// entire string, or just a single path portion, to prevent dots
+// and/or traversal patterns, when needed.
+// Exts don't need the ^ or / bit, because the root binds that already.
+const startNoTraversal = '(?!(?:^|/)\\.\\.?(?:$|/))';
+const startNoDot = '(?!\\.)';
+// characters that indicate a start of pattern needs the "no dots" bit,
+// because a dot *might* be matched. ( is not in the list, because in
+// the case of a child extglob, it will handle the prevention itself.
+const addPatternStart = new Set(['[', '.']);
+// cases where traversal is A-OK, no dot prevention needed
+const justDots = new Set(['..', '.']);
+const reSpecials = new Set('().*{}+?[]^$\\!');
+const regExpEscape = (s) => s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+// any single thing other than /
+const qmark = '[^/]';
+// * => any number of characters
+const star = qmark + '*?';
+// use + when we need to ensure that *something* matches, because the * is
+// the only thing in the path portion.
+const starNoEmpty = qmark + '+?';
+// remove the \ chars that we added if we end up doing a nonmagic compare
+// const deslash = (s: string) => s.replace(/\\(.)/g, '$1')
+let ID = 0;
+class AST {
+    type;
+    #root;
+    #hasMagic;
+    #uflag = false;
+    #parts = [];
+    #parent;
+    #parentIndex;
+    #negs;
+    #filledNegs = false;
+    #options;
+    #toString;
+    // set to true if it's an extglob with no children
+    // (which really means one child of '')
+    #emptyExt = false;
+    id = ++ID;
+    get depth() {
+        return (this.#parent?.depth ?? -1) + 1;
+    }
+    [Symbol.for('nodejs.util.inspect.custom')]() {
+        return {
+            '@@type': 'AST',
+            id: this.id,
+            type: this.type,
+            root: this.#root.id,
+            parent: this.#parent?.id,
+            depth: this.depth,
+            partsLength: this.#parts.length,
+            parts: this.#parts,
+        };
+    }
+    constructor(type, parent, options = {}) {
+        this.type = type;
+        // extglobs are inherently magical
+        if (type)
+            this.#hasMagic = true;
+        this.#parent = parent;
+        this.#root = this.#parent ? this.#parent.#root : this;
+        this.#options = this.#root === this ? options : this.#root.#options;
+        this.#negs = this.#root === this ? [] : this.#root.#negs;
+        if (type === '!' && !this.#root.#filledNegs)
+            this.#negs.push(this);
+        this.#parentIndex = this.#parent ? this.#parent.#parts.length : 0;
+    }
+    get hasMagic() {
+        /* c8 ignore start */
+        if (this.#hasMagic !== undefined)
+            return this.#hasMagic;
+        /* c8 ignore stop */
+        for (const p of this.#parts) {
+            if (typeof p === 'string')
+                continue;
+            if (p.type || p.hasMagic)
+                return (this.#hasMagic = true);
+        }
+        // note: will be undefined until we generate the regexp src and find out
+        return this.#hasMagic;
+    }
+    // reconstructs the pattern
+    toString() {
+        return (this.#toString !== undefined ? this.#toString
+            : !this.type ?
+                (this.#toString = this.#parts.map(p => String(p)).join(''))
+                : (this.#toString =
+                    this.type +
+                        '(' +
+                        this.#parts.map(p => String(p)).join('|') +
+                        ')'));
+    }
+    #fillNegs() {
+        /* c8 ignore start */
+        if (this !== this.#root)
+            throw new Error('should only call on root');
+        if (this.#filledNegs)
+            return this;
+        /* c8 ignore stop */
+        // call toString() once to fill this out
+        this.toString();
+        this.#filledNegs = true;
+        let n;
+        while ((n = this.#negs.pop())) {
+            if (n.type !== '!')
+                continue;
+            // walk up the tree, appending everthing that comes AFTER parentIndex
+            let p = n;
+            let pp = p.#parent;
+            while (pp) {
+                for (let i = p.#parentIndex + 1; !pp.type && i < pp.#parts.length; i++) {
+                    for (const part of n.#parts) {
+                        /* c8 ignore start */
+                        if (typeof part === 'string') {
+                            throw new Error('string part in extglob AST??');
+                        }
+                        /* c8 ignore stop */
+                        part.copyIn(pp.#parts[i]);
+                    }
+                }
+                p = pp;
+                pp = p.#parent;
+            }
+        }
+        return this;
+    }
+    push(...parts) {
+        for (const p of parts) {
+            if (p === '')
+                continue;
+            /* c8 ignore start */
+            if (typeof p !== 'string' &&
+                !(p instanceof _a && p.#parent === this)) {
+                throw new Error('invalid part: ' + p);
+            }
+            /* c8 ignore stop */
+            this.#parts.push(p);
+        }
+    }
+    toJSON() {
+        const ret = this.type === null ?
+            this.#parts
+                .slice()
+                .map(p => (typeof p === 'string' ? p : p.toJSON()))
+            : [this.type, ...this.#parts.map(p => p.toJSON())];
+        if (this.isStart() && !this.type)
+            ret.unshift([]);
+        if (this.isEnd() &&
+            (this === this.#root ||
+                (this.#root.#filledNegs && this.#parent?.type === '!'))) {
+            ret.push({});
+        }
+        return ret;
+    }
+    isStart() {
+        if (this.#root === this)
+            return true;
+        // if (this.type) return !!this.#parent?.isStart()
+        if (!this.#parent?.isStart())
+            return false;
+        if (this.#parentIndex === 0)
+            return true;
+        // if everything AHEAD of this is a negation, then it's still the "start"
+        const p = this.#parent;
+        for (let i = 0; i < this.#parentIndex; i++) {
+            const pp = p.#parts[i];
+            if (!(pp instanceof _a && pp.type === '!')) {
+                return false;
+            }
+        }
+        return true;
+    }
+    isEnd() {
+        if (this.#root === this)
+            return true;
+        if (this.#parent?.type === '!')
+            return true;
+        if (!this.#parent?.isEnd())
+            return false;
+        if (!this.type)
+            return this.#parent?.isEnd();
+        // if not root, it'll always have a parent
+        /* c8 ignore start */
+        const pl = this.#parent ? this.#parent.#parts.length : 0;
+        /* c8 ignore stop */
+        return this.#parentIndex === pl - 1;
+    }
+    copyIn(part) {
+        if (typeof part === 'string')
+            this.push(part);
+        else
+            this.push(part.clone(this));
+    }
+    clone(parent) {
+        const c = new _a(this.type, parent);
+        for (const p of this.#parts) {
+            c.copyIn(p);
+        }
+        return c;
+    }
+    static #parseAST(str, ast, pos, opt, extDepth) {
+        const maxDepth = opt.maxExtglobRecursion ?? 2;
+        let escaping = false;
+        let inBrace = false;
+        let braceStart = -1;
+        let braceNeg = false;
+        if (ast.type === null) {
+            // outside of a extglob, append until we find a start
+            let i = pos;
+            let acc = '';
+            while (i < str.length) {
+                const c = str.charAt(i++);
+                // still accumulate escapes at this point, but we do ignore
+                // starts that are escaped
+                if (escaping || c === '\\') {
+                    escaping = !escaping;
+                    acc += c;
+                    continue;
+                }
+                if (inBrace) {
+                    if (i === braceStart + 1) {
+                        if (c === '^' || c === '!') {
+                            braceNeg = true;
+                        }
+                    }
+                    else if (c === ']' && !(i === braceStart + 2 && braceNeg)) {
+                        inBrace = false;
+                    }
+                    acc += c;
+                    continue;
+                }
+                else if (c === '[') {
+                    inBrace = true;
+                    braceStart = i;
+                    braceNeg = false;
+                    acc += c;
+                    continue;
+                }
+                // we don't have to check for adoption here, because that's
+                // done at the other recursion point.
+                const doRecurse = !opt.noext &&
+                    isExtglobType(c) &&
+                    str.charAt(i) === '(' &&
+                    extDepth <= maxDepth;
+                if (doRecurse) {
+                    ast.push(acc);
+                    acc = '';
+                    const ext = new _a(c, ast);
+                    i = _a.#parseAST(str, ext, i, opt, extDepth + 1);
+                    ast.push(ext);
+                    continue;
+                }
+                acc += c;
+            }
+            ast.push(acc);
+            return i;
+        }
+        // some kind of extglob, pos is at the (
+        // find the next | or )
+        let i = pos + 1;
+        let part = new _a(null, ast);
+        const parts = [];
+        let acc = '';
+        while (i < str.length) {
+            const c = str.charAt(i++);
+            // still accumulate escapes at this point, but we do ignore
+            // starts that are escaped
+            if (escaping || c === '\\') {
+                escaping = !escaping;
+                acc += c;
+                continue;
+            }
+            if (inBrace) {
+                if (i === braceStart + 1) {
+                    if (c === '^' || c === '!') {
+                        braceNeg = true;
+                    }
+                }
+                else if (c === ']' && !(i === braceStart + 2 && braceNeg)) {
+                    inBrace = false;
+                }
+                acc += c;
+                continue;
+            }
+            else if (c === '[') {
+                inBrace = true;
+                braceStart = i;
+                braceNeg = false;
+                acc += c;
+                continue;
+            }
+            const doRecurse = !opt.noext &&
+                isExtglobType(c) &&
+                str.charAt(i) === '(' &&
+                /* c8 ignore start - the maxDepth is sufficient here */
+                (extDepth <= maxDepth || (ast && ast.#canAdoptType(c)));
+            /* c8 ignore stop */
+            if (doRecurse) {
+                const depthAdd = ast && ast.#canAdoptType(c) ? 0 : 1;
+                part.push(acc);
+                acc = '';
+                const ext = new _a(c, part);
+                part.push(ext);
+                i = _a.#parseAST(str, ext, i, opt, extDepth + depthAdd);
+                continue;
+            }
+            if (c === '|') {
+                part.push(acc);
+                acc = '';
+                parts.push(part);
+                part = new _a(null, ast);
+                continue;
+            }
+            if (c === ')') {
+                if (acc === '' && ast.#parts.length === 0) {
+                    ast.#emptyExt = true;
+                }
+                part.push(acc);
+                acc = '';
+                ast.push(...parts, part);
+                return i;
+            }
+            acc += c;
+        }
+        // unfinished extglob
+        // if we got here, it was a malformed extglob! not an extglob, but
+        // maybe something else in there.
+        ast.type = null;
+        ast.#hasMagic = undefined;
+        ast.#parts = [str.substring(pos - 1)];
+        return i;
+    }
+    #canAdoptWithSpace(child) {
+        return this.#canAdopt(child, adoptionWithSpaceMap);
+    }
+    #canAdopt(child, map = adoptionMap) {
+        if (!child ||
+            typeof child !== 'object' ||
+            child.type !== null ||
+            child.#parts.length !== 1 ||
+            this.type === null) {
+            return false;
+        }
+        const gc = child.#parts[0];
+        if (!gc || typeof gc !== 'object' || gc.type === null) {
+            return false;
+        }
+        return this.#canAdoptType(gc.type, map);
+    }
+    #canAdoptType(c, map = adoptionAnyMap) {
+        return !!map.get(this.type)?.includes(c);
+    }
+    #adoptWithSpace(child, index) {
+        const gc = child.#parts[0];
+        const blank = new _a(null, gc, this.options);
+        blank.#parts.push('');
+        gc.push(blank);
+        this.#adopt(child, index);
+    }
+    #adopt(child, index) {
+        const gc = child.#parts[0];
+        this.#parts.splice(index, 1, ...gc.#parts);
+        for (const p of gc.#parts) {
+            if (typeof p === 'object')
+                p.#parent = this;
+        }
+        this.#toString = undefined;
+    }
+    #canUsurpType(c) {
+        const m = usurpMap.get(this.type);
+        return !!m?.has(c);
+    }
+    #canUsurp(child) {
+        if (!child ||
+            typeof child !== 'object' ||
+            child.type !== null ||
+            child.#parts.length !== 1 ||
+            this.type === null ||
+            this.#parts.length !== 1) {
+            return false;
+        }
+        const gc = child.#parts[0];
+        if (!gc || typeof gc !== 'object' || gc.type === null) {
+            return false;
+        }
+        return this.#canUsurpType(gc.type);
+    }
+    #usurp(child) {
+        const m = usurpMap.get(this.type);
+        const gc = child.#parts[0];
+        const nt = m?.get(gc.type);
+        /* c8 ignore start - impossible */
+        if (!nt)
+            return false;
+        /* c8 ignore stop */
+        this.#parts = gc.#parts;
+        for (const p of this.#parts) {
+            if (typeof p === 'object') {
+                p.#parent = this;
+            }
+        }
+        this.type = nt;
+        this.#toString = undefined;
+        this.#emptyExt = false;
+    }
+    static fromGlob(pattern, options = {}) {
+        const ast = new _a(null, undefined, options);
+        _a.#parseAST(pattern, ast, 0, options, 0);
+        return ast;
+    }
+    // returns the regular expression if there's magic, or the unescaped
+    // string if not.
+    toMMPattern() {
+        // should only be called on root
+        /* c8 ignore start */
+        if (this !== this.#root)
+            return this.#root.toMMPattern();
+        /* c8 ignore stop */
+        const glob = this.toString();
+        const [re, body, hasMagic, uflag] = this.toRegExpSource();
+        // if we're in nocase mode, and not nocaseMagicOnly, then we do
+        // still need a regular expression if we have to case-insensitively
+        // match capital/lowercase characters.
+        const anyMagic = hasMagic ||
+            this.#hasMagic ||
+            (this.#options.nocase &&
+                !this.#options.nocaseMagicOnly &&
+                glob.toUpperCase() !== glob.toLowerCase());
+        if (!anyMagic) {
+            return body;
+        }
+        const flags = (this.#options.nocase ? 'i' : '') + (uflag ? 'u' : '');
+        return Object.assign(new RegExp(`^${re}$`, flags), {
+            _src: re,
+            _glob: glob,
+        });
+    }
+    get options() {
+        return this.#options;
+    }
+    // returns the string match, the regexp source, whether there's magic
+    // in the regexp (so a regular expression is required) and whether or
+    // not the uflag is needed for the regular expression (for posix classes)
+    // TODO: instead of injecting the start/end at this point, just return
+    // the BODY of the regexp, along with the start/end portions suitable
+    // for binding the start/end in either a joined full-path makeRe context
+    // (where we bind to (^|/), or a standalone matchPart context (where
+    // we bind to ^, and not /).  Otherwise slashes get duped!
+    //
+    // In part-matching mode, the start is:
+    // - if not isStart: nothing
+    // - if traversal possible, but not allowed: ^(?!\.\.?$)
+    // - if dots allowed or not possible: ^
+    // - if dots possible and not allowed: ^(?!\.)
+    // end is:
+    // - if not isEnd(): nothing
+    // - else: $
+    //
+    // In full-path matching mode, we put the slash at the START of the
+    // pattern, so start is:
+    // - if first pattern: same as part-matching mode
+    // - if not isStart(): nothing
+    // - if traversal possible, but not allowed: /(?!\.\.?(?:$|/))
+    // - if dots allowed or not possible: /
+    // - if dots possible and not allowed: /(?!\.)
+    // end is:
+    // - if last pattern, same as part-matching mode
+    // - else nothing
+    //
+    // Always put the (?:$|/) on negated tails, though, because that has to be
+    // there to bind the end of the negated pattern portion, and it's easier to
+    // just stick it in now rather than try to inject it later in the middle of
+    // the pattern.
+    //
+    // We can just always return the same end, and leave it up to the caller
+    // to know whether it's going to be used joined or in parts.
+    // And, if the start is adjusted slightly, can do the same there:
+    // - if not isStart: nothing
+    // - if traversal possible, but not allowed: (?:/|^)(?!\.\.?$)
+    // - if dots allowed or not possible: (?:/|^)
+    // - if dots possible and not allowed: (?:/|^)(?!\.)
+    //
+    // But it's better to have a simpler binding without a conditional, for
+    // performance, so probably better to return both start options.
+    //
+    // Then the caller just ignores the end if it's not the first pattern,
+    // and the start always gets applied.
+    //
+    // But that's always going to be $ if it's the ending pattern, or nothing,
+    // so the caller can just attach $ at the end of the pattern when building.
+    //
+    // So the todo is:
+    // - better detect what kind of start is needed
+    // - return both flavors of starting pattern
+    // - attach $ at the end of the pattern when creating the actual RegExp
+    //
+    // Ah, but wait, no, that all only applies to the root when the first pattern
+    // is not an extglob. If the first pattern IS an extglob, then we need all
+    // that dot prevention biz to live in the extglob portions, because eg
+    // +(*|.x*) can match .xy but not .yx.
+    //
+    // So, return the two flavors if it's #root and the first child is not an
+    // AST, otherwise leave it to the child AST to handle it, and there,
+    // use the (?:^|/) style of start binding.
+    //
+    // Even simplified further:
+    // - Since the start for a join is eg /(?!\.) and the start for a part
+    // is ^(?!\.), we can just prepend (?!\.) to the pattern (either root
+    // or start or whatever) and prepend ^ or / at the Regexp construction.
+    toRegExpSource(allowDot) {
+        const dot = allowDot ?? !!this.#options.dot;
+        if (this.#root === this) {
+            this.#flatten();
+            this.#fillNegs();
+        }
+        if (!isExtglobAST(this)) {
+            const noEmpty = this.isStart() &&
+                this.isEnd() &&
+                !this.#parts.some(s => typeof s !== 'string');
+            const src = this.#parts
+                .map(p => {
+                const [re, _, hasMagic, uflag] = typeof p === 'string' ?
+                    _a.#parseGlob(p, this.#hasMagic, noEmpty)
+                    : p.toRegExpSource(allowDot);
+                this.#hasMagic = this.#hasMagic || hasMagic;
+                this.#uflag = this.#uflag || uflag;
+                return re;
+            })
+                .join('');
+            let start = '';
+            if (this.isStart()) {
+                if (typeof this.#parts[0] === 'string') {
+                    // this is the string that will match the start of the pattern,
+                    // so we need to protect against dots and such.
+                    // '.' and '..' cannot match unless the pattern is that exactly,
+                    // even if it starts with . or dot:true is set.
+                    const dotTravAllowed = this.#parts.length === 1 && justDots.has(this.#parts[0]);
+                    if (!dotTravAllowed) {
+                        const aps = addPatternStart;
+                        // check if we have a possibility of matching . or ..,
+                        // and prevent that.
+                        const needNoTrav = 
+                        // dots are allowed, and the pattern starts with [ or .
+                        (dot && aps.has(src.charAt(0))) ||
+                            // the pattern starts with \., and then [ or .
+                            (src.startsWith('\\.') && aps.has(src.charAt(2))) ||
+                            // the pattern starts with \.\., and then [ or .
+                            (src.startsWith('\\.\\.') && aps.has(src.charAt(4)));
+                        // no need to prevent dots if it can't match a dot, or if a
+                        // sub-pattern will be preventing it anyway.
+                        const needNoDot = !dot && !allowDot && aps.has(src.charAt(0));
+                        start =
+                            needNoTrav ? startNoTraversal
+                                : needNoDot ? startNoDot
+                                    : '';
+                    }
+                }
+            }
+            // append the "end of path portion" pattern to negation tails
+            let end = '';
+            if (this.isEnd() &&
+                this.#root.#filledNegs &&
+                this.#parent?.type === '!') {
+                end = '(?:$|\\/)';
+            }
+            const final = start + src + end;
+            return [
+                final,
+                (0, unescape_js_1.unescape)(src),
+                (this.#hasMagic = !!this.#hasMagic),
+                this.#uflag,
+            ];
+        }
+        // We need to calculate the body *twice* if it's a repeat pattern
+        // at the start, once in nodot mode, then again in dot mode, so a
+        // pattern like *(?) can match 'x.y'
+        const repeated = this.type === '*' || this.type === '+';
+        // some kind of extglob
+        const start = this.type === '!' ? '(?:(?!(?:' : '(?:';
+        let body = this.#partsToRegExp(dot);
+        if (this.isStart() && this.isEnd() && !body && this.type !== '!') {
+            // invalid extglob, has to at least be *something* present, if it's
+            // the entire path portion.
+            const s = this.toString();
+            const me = this;
+            me.#parts = [s];
+            me.type = null;
+            me.#hasMagic = undefined;
+            return [s, (0, unescape_js_1.unescape)(this.toString()), false, false];
+        }
+        let bodyDotAllowed = !repeated || allowDot || dot || !startNoDot ?
+            ''
+            : this.#partsToRegExp(true);
+        if (bodyDotAllowed === body) {
+            bodyDotAllowed = '';
+        }
+        if (bodyDotAllowed) {
+            body = `(?:${body})(?:${bodyDotAllowed})*?`;
+        }
+        // an empty !() is exactly equivalent to a starNoEmpty
+        let final = '';
+        if (this.type === '!' && this.#emptyExt) {
+            final = (this.isStart() && !dot ? startNoDot : '') + starNoEmpty;
+        }
+        else {
+            const close = this.type === '!' ?
+                // !() must match something,but !(x) can match ''
+                '))' +
+                    (this.isStart() && !dot && !allowDot ? startNoDot : '') +
+                    star +
+                    ')'
+                : this.type === '@' ? ')'
+                    : this.type === '?' ? ')?'
+                        : this.type === '+' && bodyDotAllowed ? ')'
+                            : this.type === '*' && bodyDotAllowed ? `)?`
+                                : `)${this.type}`;
+            final = start + body + close;
+        }
+        return [
+            final,
+            (0, unescape_js_1.unescape)(body),
+            (this.#hasMagic = !!this.#hasMagic),
+            this.#uflag,
+        ];
+    }
+    #flatten() {
+        if (!isExtglobAST(this)) {
+            for (const p of this.#parts) {
+                if (typeof p === 'object') {
+                    p.#flatten();
+                }
+            }
+        }
+        else {
+            // do up to 10 passes to flatten as much as possible
+            let iterations = 0;
+            let done = false;
+            do {
+                done = true;
+                for (let i = 0; i < this.#parts.length; i++) {
+                    const c = this.#parts[i];
+                    if (typeof c === 'object') {
+                        c.#flatten();
+                        if (this.#canAdopt(c)) {
+                            done = false;
+                            this.#adopt(c, i);
+                        }
+                        else if (this.#canAdoptWithSpace(c)) {
+                            done = false;
+                            this.#adoptWithSpace(c, i);
+                        }
+                        else if (this.#canUsurp(c)) {
+                            done = false;
+                            this.#usurp(c);
+                        }
+                    }
+                }
+            } while (!done && ++iterations < 10);
+        }
+        this.#toString = undefined;
+    }
+    #partsToRegExp(dot) {
+        return this.#parts
+            .map(p => {
+            // extglob ASTs should only contain parent ASTs
+            /* c8 ignore start */
+            if (typeof p === 'string') {
+                throw new Error('string type in extglob ast??');
+            }
+            /* c8 ignore stop */
+            // can ignore hasMagic, because extglobs are already always magic
+            const [re, _, _hasMagic, uflag] = p.toRegExpSource(dot);
+            this.#uflag = this.#uflag || uflag;
+            return re;
+        })
+            .filter(p => !(this.isStart() && this.isEnd()) || !!p)
+            .join('|');
+    }
+    static #parseGlob(glob, hasMagic, noEmpty = false) {
+        let escaping = false;
+        let re = '';
+        let uflag = false;
+        // multiple stars that aren't globstars coalesce into one *
+        let inStar = false;
+        for (let i = 0; i < glob.length; i++) {
+            const c = glob.charAt(i);
+            if (escaping) {
+                escaping = false;
+                re += (reSpecials.has(c) ? '\\' : '') + c;
+                continue;
+            }
+            if (c === '*') {
+                if (inStar)
+                    continue;
+                inStar = true;
+                re += noEmpty && /^[*]+$/.test(glob) ? starNoEmpty : star;
+                hasMagic = true;
+                continue;
+            }
+            else {
+                inStar = false;
+            }
+            if (c === '\\') {
+                if (i === glob.length - 1) {
+                    re += '\\\\';
+                }
+                else {
+                    escaping = true;
+                }
+                continue;
+            }
+            if (c === '[') {
+                const [src, needUflag, consumed, magic] = (0, brace_expressions_js_1.parseClass)(glob, i);
+                if (consumed) {
+                    re += src;
+                    uflag = uflag || needUflag;
+                    i += consumed - 1;
+                    hasMagic = hasMagic || magic;
+                    continue;
+                }
+            }
+            if (c === '?') {
+                re += qmark;
+                hasMagic = true;
+                continue;
+            }
+            re += regExpEscape(c);
+        }
+        return [re, (0, unescape_js_1.unescape)(glob), !!hasMagic, uflag];
+    }
+}
+exports.AST = AST;
+_a = AST;
+//# sourceMappingURL=ast.js.map
+
+/***/ }),
+
+/***/ 77576:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+// translate the various posix character classes into unicode properties
+// this works across all unicode locales
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseClass = void 0;
+// { <posix class>: [<translation>, /u flag required, negated]
+const posixClasses = {
+    '[:alnum:]': ['\\p{L}\\p{Nl}\\p{Nd}', true],
+    '[:alpha:]': ['\\p{L}\\p{Nl}', true],
+    '[:ascii:]': ['\\x' + '00-\\x' + '7f', false],
+    '[:blank:]': ['\\p{Zs}\\t', true],
+    '[:cntrl:]': ['\\p{Cc}', true],
+    '[:digit:]': ['\\p{Nd}', true],
+    '[:graph:]': ['\\p{Z}\\p{C}', true, true],
+    '[:lower:]': ['\\p{Ll}', true],
+    '[:print:]': ['\\p{C}', true],
+    '[:punct:]': ['\\p{P}', true],
+    '[:space:]': ['\\p{Z}\\t\\r\\n\\v\\f', true],
+    '[:upper:]': ['\\p{Lu}', true],
+    '[:word:]': ['\\p{L}\\p{Nl}\\p{Nd}\\p{Pc}', true],
+    '[:xdigit:]': ['A-Fa-f0-9', false],
+};
+// only need to escape a few things inside of brace expressions
+// escapes: [ \ ] -
+const braceEscape = (s) => s.replace(/[[\]\\-]/g, '\\$&');
+// escape all regexp magic characters
+const regexpEscape = (s) => s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+// everything has already been escaped, we just have to join
+const rangesToString = (ranges) => ranges.join('');
+// takes a glob string at a posix brace expression, and returns
+// an equivalent regular expression source, and boolean indicating
+// whether the /u flag needs to be applied, and the number of chars
+// consumed to parse the character class.
+// This also removes out of order ranges, and returns ($.) if the
+// entire class just no good.
+const parseClass = (glob, position) => {
+    const pos = position;
+    /* c8 ignore start */
+    if (glob.charAt(pos) !== '[') {
+        throw new Error('not in a brace expression');
+    }
+    /* c8 ignore stop */
+    const ranges = [];
+    const negs = [];
+    let i = pos + 1;
+    let sawStart = false;
+    let uflag = false;
+    let escaping = false;
+    let negate = false;
+    let endPos = pos;
+    let rangeStart = '';
+    WHILE: while (i < glob.length) {
+        const c = glob.charAt(i);
+        if ((c === '!' || c === '^') && i === pos + 1) {
+            negate = true;
+            i++;
+            continue;
+        }
+        if (c === ']' && sawStart && !escaping) {
+            endPos = i + 1;
+            break;
+        }
+        sawStart = true;
+        if (c === '\\') {
+            if (!escaping) {
+                escaping = true;
+                i++;
+                continue;
+            }
+            // escaped \ char, fall through and treat like normal char
+        }
+        if (c === '[' && !escaping) {
+            // either a posix class, a collation equivalent, or just a [
+            for (const [cls, [unip, u, neg]] of Object.entries(posixClasses)) {
+                if (glob.startsWith(cls, i)) {
+                    // invalid, [a-[] is fine, but not [a-[:alpha]]
+                    if (rangeStart) {
+                        return ['$.', false, glob.length - pos, true];
+                    }
+                    i += cls.length;
+                    if (neg)
+                        negs.push(unip);
+                    else
+                        ranges.push(unip);
+                    uflag = uflag || u;
+                    continue WHILE;
+                }
+            }
+        }
+        // now it's just a normal character, effectively
+        escaping = false;
+        if (rangeStart) {
+            // throw this range away if it's not valid, but others
+            // can still match.
+            if (c > rangeStart) {
+                ranges.push(braceEscape(rangeStart) + '-' + braceEscape(c));
+            }
+            else if (c === rangeStart) {
+                ranges.push(braceEscape(c));
+            }
+            rangeStart = '';
+            i++;
+            continue;
+        }
+        // now might be the start of a range.
+        // can be either c-d or c-] or c<more...>] or c] at this point
+        if (glob.startsWith('-]', i + 1)) {
+            ranges.push(braceEscape(c + '-'));
+            i += 2;
+            continue;
+        }
+        if (glob.startsWith('-', i + 1)) {
+            rangeStart = c;
+            i += 2;
+            continue;
+        }
+        // not the start of a range, just a single character
+        ranges.push(braceEscape(c));
+        i++;
+    }
+    if (endPos < i) {
+        // didn't see the end of the class, not a valid class,
+        // but might still be valid as a literal match.
+        return ['', false, 0, false];
+    }
+    // if we got no ranges and no negates, then we have a range that
+    // cannot possibly match anything, and that poisons the whole glob
+    if (!ranges.length && !negs.length) {
+        return ['$.', false, glob.length - pos, true];
+    }
+    // if we got one positive range, and it's a single character, then that's
+    // not actually a magic pattern, it's just that one literal character.
+    // we should not treat that as "magic", we should just return the literal
+    // character. [_] is a perfectly valid way to escape glob magic chars.
+    if (negs.length === 0 &&
+        ranges.length === 1 &&
+        /^\\?.$/.test(ranges[0]) &&
+        !negate) {
+        const r = ranges[0].length === 2 ? ranges[0].slice(-1) : ranges[0];
+        return [regexpEscape(r), false, endPos - pos, false];
+    }
+    const sranges = '[' + (negate ? '^' : '') + rangesToString(ranges) + ']';
+    const snegs = '[' + (negate ? '' : '^') + rangesToString(negs) + ']';
+    const comb = ranges.length && negs.length ? '(' + sranges + '|' + snegs + ')'
+        : ranges.length ? sranges
+            : snegs;
+    return [comb, uflag, endPos - pos, true];
+};
+exports.parseClass = parseClass;
+//# sourceMappingURL=brace-expressions.js.map
+
+/***/ }),
+
+/***/ 67733:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.escape = void 0;
+/**
+ * Escape all magic characters in a glob pattern.
+ *
+ * If the {@link MinimatchOptions.windowsPathsNoEscape}
+ * option is used, then characters are escaped by wrapping in `[]`, because
+ * a magic character wrapped in a character class can only be satisfied by
+ * that exact character.  In this mode, `\` is _not_ escaped, because it is
+ * not interpreted as a magic character, but instead as a path separator.
+ *
+ * If the {@link MinimatchOptions.magicalBraces} option is used,
+ * then braces (`{` and `}`) will be escaped.
+ */
+const escape = (s, { windowsPathsNoEscape = false, magicalBraces = false, } = {}) => {
+    // don't need to escape +@! because we escape the parens
+    // that make those magic, and escaping ! as [!] isn't valid,
+    // because [!]] is a valid glob class meaning not ']'.
+    if (magicalBraces) {
+        return windowsPathsNoEscape ?
+            s.replace(/[?*()[\]{}]/g, '[$&]')
+            : s.replace(/[?*()[\]\\{}]/g, '\\$&');
+    }
+    return windowsPathsNoEscape ?
+        s.replace(/[?*()[\]]/g, '[$&]')
+        : s.replace(/[?*()[\]\\]/g, '\\$&');
+};
+exports.escape = escape;
+//# sourceMappingURL=escape.js.map
+
+/***/ }),
+
+/***/ 53378:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.unescape = exports.escape = exports.AST = exports.Minimatch = exports.match = exports.makeRe = exports.braceExpand = exports.defaults = exports.filter = exports.GLOBSTAR = exports.sep = exports.minimatch = void 0;
+const brace_expansion_1 = __nccwpck_require__(292);
+const assert_valid_pattern_js_1 = __nccwpck_require__(18394);
+const ast_js_1 = __nccwpck_require__(29530);
+const escape_js_1 = __nccwpck_require__(67733);
+const unescape_js_1 = __nccwpck_require__(49850);
+const minimatch = (p, pattern, options = {}) => {
+    (0, assert_valid_pattern_js_1.assertValidPattern)(pattern);
+    // shortcut: comments match nothing.
+    if (!options.nocomment && pattern.charAt(0) === '#') {
+        return false;
+    }
+    return new Minimatch(pattern, options).match(p);
+};
+exports.minimatch = minimatch;
+// Optimized checking for the most common glob patterns.
+const starDotExtRE = /^\*+([^+@!?*[(]*)$/;
+const starDotExtTest = (ext) => (f) => !f.startsWith('.') && f.endsWith(ext);
+const starDotExtTestDot = (ext) => (f) => f.endsWith(ext);
+const starDotExtTestNocase = (ext) => {
+    ext = ext.toLowerCase();
+    return (f) => !f.startsWith('.') && f.toLowerCase().endsWith(ext);
+};
+const starDotExtTestNocaseDot = (ext) => {
+    ext = ext.toLowerCase();
+    return (f) => f.toLowerCase().endsWith(ext);
+};
+const starDotStarRE = /^\*+\.\*+$/;
+const starDotStarTest = (f) => !f.startsWith('.') && f.includes('.');
+const starDotStarTestDot = (f) => f !== '.' && f !== '..' && f.includes('.');
+const dotStarRE = /^\.\*+$/;
+const dotStarTest = (f) => f !== '.' && f !== '..' && f.startsWith('.');
+const starRE = /^\*+$/;
+const starTest = (f) => f.length !== 0 && !f.startsWith('.');
+const starTestDot = (f) => f.length !== 0 && f !== '.' && f !== '..';
+const qmarksRE = /^\?+([^+@!?*[(]*)?$/;
+const qmarksTestNocase = ([$0, ext = '']) => {
+    const noext = qmarksTestNoExt([$0]);
+    if (!ext)
+        return noext;
+    ext = ext.toLowerCase();
+    return (f) => noext(f) && f.toLowerCase().endsWith(ext);
+};
+const qmarksTestNocaseDot = ([$0, ext = '']) => {
+    const noext = qmarksTestNoExtDot([$0]);
+    if (!ext)
+        return noext;
+    ext = ext.toLowerCase();
+    return (f) => noext(f) && f.toLowerCase().endsWith(ext);
+};
+const qmarksTestDot = ([$0, ext = '']) => {
+    const noext = qmarksTestNoExtDot([$0]);
+    return !ext ? noext : (f) => noext(f) && f.endsWith(ext);
+};
+const qmarksTest = ([$0, ext = '']) => {
+    const noext = qmarksTestNoExt([$0]);
+    return !ext ? noext : (f) => noext(f) && f.endsWith(ext);
+};
+const qmarksTestNoExt = ([$0]) => {
+    const len = $0.length;
+    return (f) => f.length === len && !f.startsWith('.');
+};
+const qmarksTestNoExtDot = ([$0]) => {
+    const len = $0.length;
+    return (f) => f.length === len && f !== '.' && f !== '..';
+};
+/* c8 ignore start */
+const defaultPlatform = (typeof process === 'object' && process ?
+    (typeof process.env === 'object' &&
+        process.env &&
+        process.env.__MINIMATCH_TESTING_PLATFORM__) ||
+        process.platform
+    : 'posix');
+const path = {
+    win32: { sep: '\\' },
+    posix: { sep: '/' },
+};
+/* c8 ignore stop */
+exports.sep = defaultPlatform === 'win32' ? path.win32.sep : path.posix.sep;
+exports.minimatch.sep = exports.sep;
+exports.GLOBSTAR = Symbol('globstar **');
+exports.minimatch.GLOBSTAR = exports.GLOBSTAR;
+// any single thing other than /
+// don't need to escape / when using new RegExp()
+const qmark = '[^/]';
+// * => any number of characters
+const star = qmark + '*?';
+// ** when dots are allowed.  Anything goes, except .. and .
+// not (^ or / followed by one or two dots followed by $ or /),
+// followed by anything, any number of times.
+const twoStarDot = '(?:(?!(?:\\/|^)(?:\\.{1,2})($|\\/)).)*?';
+// not a ^ or / followed by a dot,
+// followed by anything, any number of times.
+const twoStarNoDot = '(?:(?!(?:\\/|^)\\.).)*?';
+const filter = (pattern, options = {}) => (p) => (0, exports.minimatch)(p, pattern, options);
+exports.filter = filter;
+exports.minimatch.filter = exports.filter;
+const ext = (a, b = {}) => Object.assign({}, a, b);
+const defaults = (def) => {
+    if (!def || typeof def !== 'object' || !Object.keys(def).length) {
+        return exports.minimatch;
+    }
+    const orig = exports.minimatch;
+    const m = (p, pattern, options = {}) => orig(p, pattern, ext(def, options));
+    return Object.assign(m, {
+        Minimatch: class Minimatch extends orig.Minimatch {
+            constructor(pattern, options = {}) {
+                super(pattern, ext(def, options));
+            }
+            static defaults(options) {
+                return orig.defaults(ext(def, options)).Minimatch;
+            }
+        },
+        AST: class AST extends orig.AST {
+            /* c8 ignore start */
+            constructor(type, parent, options = {}) {
+                super(type, parent, ext(def, options));
+            }
+            /* c8 ignore stop */
+            static fromGlob(pattern, options = {}) {
+                return orig.AST.fromGlob(pattern, ext(def, options));
+            }
+        },
+        unescape: (s, options = {}) => orig.unescape(s, ext(def, options)),
+        escape: (s, options = {}) => orig.escape(s, ext(def, options)),
+        filter: (pattern, options = {}) => orig.filter(pattern, ext(def, options)),
+        defaults: (options) => orig.defaults(ext(def, options)),
+        makeRe: (pattern, options = {}) => orig.makeRe(pattern, ext(def, options)),
+        braceExpand: (pattern, options = {}) => orig.braceExpand(pattern, ext(def, options)),
+        match: (list, pattern, options = {}) => orig.match(list, pattern, ext(def, options)),
+        sep: orig.sep,
+        GLOBSTAR: exports.GLOBSTAR,
+    });
+};
+exports.defaults = defaults;
+exports.minimatch.defaults = exports.defaults;
+// Brace expansion:
+// a{b,c}d -> abd acd
+// a{b,}c -> abc ac
+// a{0..3}d -> a0d a1d a2d a3d
+// a{b,c{d,e}f}g -> abg acdfg acefg
+// a{b,c}d{e,f}g -> abdeg acdeg abdeg abdfg
+//
+// Invalid sets are not expanded.
+// a{2..}b -> a{2..}b
+// a{b}c -> a{b}c
+const braceExpand = (pattern, options = {}) => {
+    (0, assert_valid_pattern_js_1.assertValidPattern)(pattern);
+    // Thanks to Yeting Li <https://github.com/yetingli> for
+    // improving this regexp to avoid a ReDOS vulnerability.
+    if (options.nobrace || !/\{(?:(?!\{).)*\}/.test(pattern)) {
+        // shortcut. no need to expand.
+        return [pattern];
+    }
+    return (0, brace_expansion_1.expand)(pattern, { max: options.braceExpandMax });
+};
+exports.braceExpand = braceExpand;
+exports.minimatch.braceExpand = exports.braceExpand;
+// parse a component of the expanded set.
+// At this point, no pattern may contain "/" in it
+// so we're going to return a 2d array, where each entry is the full
+// pattern, split on '/', and then turned into a regular expression.
+// A regexp is made at the end which joins each array with an
+// escaped /, and another full one which joins each regexp with |.
+//
+// Following the lead of Bash 4.1, note that "**" only has special meaning
+// when it is the *only* thing in a path portion.  Otherwise, any series
+// of * is equivalent to a single *.  Globstar behavior is enabled by
+// default, and can be disabled by setting options.noglobstar.
+const makeRe = (pattern, options = {}) => new Minimatch(pattern, options).makeRe();
+exports.makeRe = makeRe;
+exports.minimatch.makeRe = exports.makeRe;
+const match = (list, pattern, options = {}) => {
+    const mm = new Minimatch(pattern, options);
+    list = list.filter(f => mm.match(f));
+    if (mm.options.nonull && !list.length) {
+        list.push(pattern);
+    }
+    return list;
+};
+exports.match = match;
+exports.minimatch.match = exports.match;
+// replace stuff like \* with *
+const globMagic = /[?*]|[+@!]\(.*?\)|\[|\]/;
+const regExpEscape = (s) => s.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+class Minimatch {
+    options;
+    set;
+    pattern;
+    windowsPathsNoEscape;
+    nonegate;
+    negate;
+    comment;
+    empty;
+    preserveMultipleSlashes;
+    partial;
+    globSet;
+    globParts;
+    nocase;
+    isWindows;
+    platform;
+    windowsNoMagicRoot;
+    maxGlobstarRecursion;
+    regexp;
+    constructor(pattern, options = {}) {
+        (0, assert_valid_pattern_js_1.assertValidPattern)(pattern);
+        options = options || {};
+        this.options = options;
+        this.maxGlobstarRecursion = options.maxGlobstarRecursion ?? 200;
+        this.pattern = pattern;
+        this.platform = options.platform || defaultPlatform;
+        this.isWindows = this.platform === 'win32';
+        // avoid the annoying deprecation flag lol
+        const awe = ('allowWindow' + 'sEscape');
+        this.windowsPathsNoEscape =
+            !!options.windowsPathsNoEscape || options[awe] === false;
+        if (this.windowsPathsNoEscape) {
+            this.pattern = this.pattern.replace(/\\/g, '/');
+        }
+        this.preserveMultipleSlashes = !!options.preserveMultipleSlashes;
+        this.regexp = null;
+        this.negate = false;
+        this.nonegate = !!options.nonegate;
+        this.comment = false;
+        this.empty = false;
+        this.partial = !!options.partial;
+        this.nocase = !!this.options.nocase;
+        this.windowsNoMagicRoot =
+            options.windowsNoMagicRoot !== undefined ?
+                options.windowsNoMagicRoot
+                : !!(this.isWindows && this.nocase);
+        this.globSet = [];
+        this.globParts = [];
+        this.set = [];
+        // make the set of regexps etc.
+        this.make();
+    }
+    hasMagic() {
+        if (this.options.magicalBraces && this.set.length > 1) {
+            return true;
+        }
+        for (const pattern of this.set) {
+            for (const part of pattern) {
+                if (typeof part !== 'string')
+                    return true;
+            }
+        }
+        return false;
+    }
+    debug(..._) { }
+    make() {
+        const pattern = this.pattern;
+        const options = this.options;
+        // empty patterns and comments match nothing.
+        if (!options.nocomment && pattern.charAt(0) === '#') {
+            this.comment = true;
+            return;
+        }
+        if (!pattern) {
+            this.empty = true;
+            return;
+        }
+        // step 1: figure out negation, etc.
+        this.parseNegate();
+        // step 2: expand braces
+        this.globSet = [...new Set(this.braceExpand())];
+        if (options.debug) {
+            //oxlint-disable-next-line no-console
+            this.debug = (...args) => console.error(...args);
+        }
+        this.debug(this.pattern, this.globSet);
+        // step 3: now we have a set, so turn each one into a series of
+        // path-portion matching patterns.
+        // These will be regexps, except in the case of "**", which is
+        // set to the GLOBSTAR object for globstar behavior,
+        // and will not contain any / characters
+        //
+        // First, we preprocess to make the glob pattern sets a bit simpler
+        // and deduped.  There are some perf-killing patterns that can cause
+        // problems with a glob walk, but we can simplify them down a bit.
+        const rawGlobParts = this.globSet.map(s => this.slashSplit(s));
+        this.globParts = this.preprocess(rawGlobParts);
+        this.debug(this.pattern, this.globParts);
+        // glob --> regexps
+        let set = this.globParts.map((s, _, __) => {
+            if (this.isWindows && this.windowsNoMagicRoot) {
+                // check if it's a drive or unc path.
+                const isUNC = s[0] === '' &&
+                    s[1] === '' &&
+                    (s[2] === '?' || !globMagic.test(s[2])) &&
+                    !globMagic.test(s[3]);
+                const isDrive = /^[a-z]:/i.test(s[0]);
+                if (isUNC) {
+                    return [
+                        ...s.slice(0, 4),
+                        ...s.slice(4).map(ss => this.parse(ss)),
+                    ];
+                }
+                else if (isDrive) {
+                    return [s[0], ...s.slice(1).map(ss => this.parse(ss))];
+                }
+            }
+            return s.map(ss => this.parse(ss));
+        });
+        this.debug(this.pattern, set);
+        // filter out everything that didn't compile properly.
+        this.set = set.filter(s => s.indexOf(false) === -1);
+        // do not treat the ? in UNC paths as magic
+        if (this.isWindows) {
+            for (let i = 0; i < this.set.length; i++) {
+                const p = this.set[i];
+                if (p[0] === '' &&
+                    p[1] === '' &&
+                    this.globParts[i][2] === '?' &&
+                    typeof p[3] === 'string' &&
+                    /^[a-z]:$/i.test(p[3])) {
+                    p[2] = '?';
+                }
+            }
+        }
+        this.debug(this.pattern, this.set);
+    }
+    // various transforms to equivalent pattern sets that are
+    // faster to process in a filesystem walk.  The goal is to
+    // eliminate what we can, and push all ** patterns as far
+    // to the right as possible, even if it increases the number
+    // of patterns that we have to process.
+    preprocess(globParts) {
+        // if we're not in globstar mode, then turn ** into *
+        if (this.options.noglobstar) {
+            for (const partset of globParts) {
+                for (let j = 0; j < partset.length; j++) {
+                    if (partset[j] === '**') {
+                        partset[j] = '*';
+                    }
+                }
+            }
+        }
+        const { optimizationLevel = 1 } = this.options;
+        if (optimizationLevel >= 2) {
+            // aggressive optimization for the purpose of fs walking
+            globParts = this.firstPhasePreProcess(globParts);
+            globParts = this.secondPhasePreProcess(globParts);
+        }
+        else if (optimizationLevel >= 1) {
+            // just basic optimizations to remove some .. parts
+            globParts = this.levelOneOptimize(globParts);
+        }
+        else {
+            // just collapse multiple ** portions into one
+            globParts = this.adjascentGlobstarOptimize(globParts);
+        }
+        return globParts;
+    }
+    // just get rid of adjascent ** portions
+    adjascentGlobstarOptimize(globParts) {
+        return globParts.map(parts => {
+            let gs = -1;
+            while (-1 !== (gs = parts.indexOf('**', gs + 1))) {
+                let i = gs;
+                while (parts[i + 1] === '**') {
+                    i++;
+                }
+                if (i !== gs) {
+                    parts.splice(gs, i - gs);
+                }
+            }
+            return parts;
+        });
+    }
+    // get rid of adjascent ** and resolve .. portions
+    levelOneOptimize(globParts) {
+        return globParts.map(parts => {
+            parts = parts.reduce((set, part) => {
+                const prev = set[set.length - 1];
+                if (part === '**' && prev === '**') {
+                    return set;
+                }
+                if (part === '..') {
+                    if (prev && prev !== '..' && prev !== '.' && prev !== '**') {
+                        set.pop();
+                        return set;
+                    }
+                }
+                set.push(part);
+                return set;
+            }, []);
+            return parts.length === 0 ? [''] : parts;
+        });
+    }
+    levelTwoFileOptimize(parts) {
+        if (!Array.isArray(parts)) {
+            parts = this.slashSplit(parts);
+        }
+        let didSomething = false;
+        do {
+            didSomething = false;
+            // <pre>/<e>/<rest> -> <pre>/<rest>
+            if (!this.preserveMultipleSlashes) {
+                for (let i = 1; i < parts.length - 1; i++) {
+                    const p = parts[i];
+                    // don't squeeze out UNC patterns
+                    if (i === 1 && p === '' && parts[0] === '')
+                        continue;
+                    if (p === '.' || p === '') {
+                        didSomething = true;
+                        parts.splice(i, 1);
+                        i--;
+                    }
+                }
+                if (parts[0] === '.' &&
+                    parts.length === 2 &&
+                    (parts[1] === '.' || parts[1] === '')) {
+                    didSomething = true;
+                    parts.pop();
+                }
+            }
+            // <pre>/<p>/../<rest> -> <pre>/<rest>
+            let dd = 0;
+            while (-1 !== (dd = parts.indexOf('..', dd + 1))) {
+                const p = parts[dd - 1];
+                if (p &&
+                    p !== '.' &&
+                    p !== '..' &&
+                    p !== '**' &&
+                    !(this.isWindows && /^[a-z]:$/i.test(p))) {
+                    didSomething = true;
+                    parts.splice(dd - 1, 2);
+                    dd -= 2;
+                }
+            }
+        } while (didSomething);
+        return parts.length === 0 ? [''] : parts;
+    }
+    // First phase: single-pattern processing
+    // <pre> is 1 or more portions
+    // <rest> is 1 or more portions
+    // <p> is any portion other than ., .., '', or **
+    // <e> is . or ''
+    //
+    // **/.. is *brutal* for filesystem walking performance, because
+    // it effectively resets the recursive walk each time it occurs,
+    // and ** cannot be reduced out by a .. pattern part like a regexp
+    // or most strings (other than .., ., and '') can be.
+    //
+    // <pre>/**/../<p>/<p>/<rest> -> {<pre>/../<p>/<p>/<rest>,<pre>/**/<p>/<p>/<rest>}
+    // <pre>/<e>/<rest> -> <pre>/<rest>
+    // <pre>/<p>/../<rest> -> <pre>/<rest>
+    // **/**/<rest> -> **/<rest>
+    //
+    // **/*/<rest> -> */**/<rest> <== not valid because ** doesn't follow
+    // this WOULD be allowed if ** did follow symlinks, or * didn't
+    firstPhasePreProcess(globParts) {
+        let didSomething = false;
+        do {
+            didSomething = false;
+            // <pre>/**/../<p>/<p>/<rest> -> {<pre>/../<p>/<p>/<rest>,<pre>/**/<p>/<p>/<rest>}
+            for (let parts of globParts) {
+                let gs = -1;
+                while (-1 !== (gs = parts.indexOf('**', gs + 1))) {
+                    let gss = gs;
+                    while (parts[gss + 1] === '**') {
+                        // <pre>/**/**/<rest> -> <pre>/**/<rest>
+                        gss++;
+                    }
+                    // eg, if gs is 2 and gss is 4, that means we have 3 **
+                    // parts, and can remove 2 of them.
+                    if (gss > gs) {
+                        parts.splice(gs + 1, gss - gs);
+                    }
+                    let next = parts[gs + 1];
+                    const p = parts[gs + 2];
+                    const p2 = parts[gs + 3];
+                    if (next !== '..')
+                        continue;
+                    if (!p ||
+                        p === '.' ||
+                        p === '..' ||
+                        !p2 ||
+                        p2 === '.' ||
+                        p2 === '..') {
+                        continue;
+                    }
+                    didSomething = true;
+                    // edit parts in place, and push the new one
+                    parts.splice(gs, 1);
+                    const other = parts.slice(0);
+                    other[gs] = '**';
+                    globParts.push(other);
+                    gs--;
+                }
+                // <pre>/<e>/<rest> -> <pre>/<rest>
+                if (!this.preserveMultipleSlashes) {
+                    for (let i = 1; i < parts.length - 1; i++) {
+                        const p = parts[i];
+                        // don't squeeze out UNC patterns
+                        if (i === 1 && p === '' && parts[0] === '')
+                            continue;
+                        if (p === '.' || p === '') {
+                            didSomething = true;
+                            parts.splice(i, 1);
+                            i--;
+                        }
+                    }
+                    if (parts[0] === '.' &&
+                        parts.length === 2 &&
+                        (parts[1] === '.' || parts[1] === '')) {
+                        didSomething = true;
+                        parts.pop();
+                    }
+                }
+                // <pre>/<p>/../<rest> -> <pre>/<rest>
+                let dd = 0;
+                while (-1 !== (dd = parts.indexOf('..', dd + 1))) {
+                    const p = parts[dd - 1];
+                    if (p && p !== '.' && p !== '..' && p !== '**') {
+                        didSomething = true;
+                        const needDot = dd === 1 && parts[dd + 1] === '**';
+                        const splin = needDot ? ['.'] : [];
+                        parts.splice(dd - 1, 2, ...splin);
+                        if (parts.length === 0)
+                            parts.push('');
+                        dd -= 2;
+                    }
+                }
+            }
+        } while (didSomething);
+        return globParts;
+    }
+    // second phase: multi-pattern dedupes
+    // {<pre>/*/<rest>,<pre>/<p>/<rest>} -> <pre>/*/<rest>
+    // {<pre>/<rest>,<pre>/<rest>} -> <pre>/<rest>
+    // {<pre>/**/<rest>,<pre>/<rest>} -> <pre>/**/<rest>
+    //
+    // {<pre>/**/<rest>,<pre>/**/<p>/<rest>} -> <pre>/**/<rest>
+    // ^-- not valid because ** doens't follow symlinks
+    secondPhasePreProcess(globParts) {
+        for (let i = 0; i < globParts.length - 1; i++) {
+            for (let j = i + 1; j < globParts.length; j++) {
+                const matched = this.partsMatch(globParts[i], globParts[j], !this.preserveMultipleSlashes);
+                if (matched) {
+                    globParts[i] = [];
+                    globParts[j] = matched;
+                    break;
+                }
+            }
+        }
+        return globParts.filter(gs => gs.length);
+    }
+    partsMatch(a, b, emptyGSMatch = false) {
+        let ai = 0;
+        let bi = 0;
+        let result = [];
+        let which = '';
+        while (ai < a.length && bi < b.length) {
+            if (a[ai] === b[bi]) {
+                result.push(which === 'b' ? b[bi] : a[ai]);
+                ai++;
+                bi++;
+            }
+            else if (emptyGSMatch && a[ai] === '**' && b[bi] === a[ai + 1]) {
+                result.push(a[ai]);
+                ai++;
+            }
+            else if (emptyGSMatch && b[bi] === '**' && a[ai] === b[bi + 1]) {
+                result.push(b[bi]);
+                bi++;
+            }
+            else if (a[ai] === '*' &&
+                b[bi] &&
+                (this.options.dot || !b[bi].startsWith('.')) &&
+                b[bi] !== '**') {
+                if (which === 'b')
+                    return false;
+                which = 'a';
+                result.push(a[ai]);
+                ai++;
+                bi++;
+            }
+            else if (b[bi] === '*' &&
+                a[ai] &&
+                (this.options.dot || !a[ai].startsWith('.')) &&
+                a[ai] !== '**') {
+                if (which === 'a')
+                    return false;
+                which = 'b';
+                result.push(b[bi]);
+                ai++;
+                bi++;
+            }
+            else {
+                return false;
+            }
+        }
+        // if we fall out of the loop, it means they two are identical
+        // as long as their lengths match
+        return a.length === b.length && result;
+    }
+    parseNegate() {
+        if (this.nonegate)
+            return;
+        const pattern = this.pattern;
+        let negate = false;
+        let negateOffset = 0;
+        for (let i = 0; i < pattern.length && pattern.charAt(i) === '!'; i++) {
+            negate = !negate;
+            negateOffset++;
+        }
+        if (negateOffset)
+            this.pattern = pattern.slice(negateOffset);
+        this.negate = negate;
+    }
+    // set partial to true to test if, for example,
+    // "/a/b" matches the start of "/*/b/*/d"
+    // Partial means, if you run out of file before you run
+    // out of pattern, then that's fine, as long as all
+    // the parts match.
+    matchOne(file, pattern, partial = false) {
+        let fileStartIndex = 0;
+        let patternStartIndex = 0;
+        // UNC paths like //?/X:/... can match X:/... and vice versa
+        // Drive letters in absolute drive or unc paths are always compared
+        // case-insensitively.
+        if (this.isWindows) {
+            const fileDrive = typeof file[0] === 'string' && /^[a-z]:$/i.test(file[0]);
+            const fileUNC = !fileDrive &&
+                file[0] === '' &&
+                file[1] === '' &&
+                file[2] === '?' &&
+                /^[a-z]:$/i.test(file[3]);
+            const patternDrive = typeof pattern[0] === 'string' && /^[a-z]:$/i.test(pattern[0]);
+            const patternUNC = !patternDrive &&
+                pattern[0] === '' &&
+                pattern[1] === '' &&
+                pattern[2] === '?' &&
+                typeof pattern[3] === 'string' &&
+                /^[a-z]:$/i.test(pattern[3]);
+            const fdi = fileUNC ? 3
+                : fileDrive ? 0
+                    : undefined;
+            const pdi = patternUNC ? 3
+                : patternDrive ? 0
+                    : undefined;
+            if (typeof fdi === 'number' && typeof pdi === 'number') {
+                const [fd, pd] = [
+                    file[fdi],
+                    pattern[pdi],
+                ];
+                // start matching at the drive letter index of each
+                if (fd.toLowerCase() === pd.toLowerCase()) {
+                    pattern[pdi] = fd;
+                    patternStartIndex = pdi;
+                    fileStartIndex = fdi;
+                }
+            }
+        }
+        // resolve and reduce . and .. portions in the file as well.
+        // don't need to do the second phase, because it's only one string[]
+        const { optimizationLevel = 1 } = this.options;
+        if (optimizationLevel >= 2) {
+            file = this.levelTwoFileOptimize(file);
+        }
+        if (pattern.includes(exports.GLOBSTAR)) {
+            return this.#matchGlobstar(file, pattern, partial, fileStartIndex, patternStartIndex);
+        }
+        return this.#matchOne(file, pattern, partial, fileStartIndex, patternStartIndex);
+    }
+    #matchGlobstar(file, pattern, partial, fileIndex, patternIndex) {
+        // split the pattern into head, tail, and middle of ** delimited parts
+        const firstgs = pattern.indexOf(exports.GLOBSTAR, patternIndex);
+        const lastgs = pattern.lastIndexOf(exports.GLOBSTAR);
+        // split the pattern up into globstar-delimited sections
+        // the tail has to be at the end, and the others just have
+        // to be found in order from the head.
+        const [head, body, tail] = partial ?
+            [
+                pattern.slice(patternIndex, firstgs),
+                pattern.slice(firstgs + 1),
+                [],
+            ]
+            : [
+                pattern.slice(patternIndex, firstgs),
+                pattern.slice(firstgs + 1, lastgs),
+                pattern.slice(lastgs + 1),
+            ];
+        // check the head, from the current file/pattern index.
+        if (head.length) {
+            const fileHead = file.slice(fileIndex, fileIndex + head.length);
+            if (!this.#matchOne(fileHead, head, partial, 0, 0)) {
+                return false;
+            }
+            fileIndex += head.length;
+            patternIndex += head.length;
+        }
+        // now we know the head matches!
+        // if the last portion is not empty, it MUST match the end
+        // check the tail
+        let fileTailMatch = 0;
+        if (tail.length) {
+            // if head + tail > file, then we cannot possibly match
+            if (tail.length + fileIndex > file.length)
+                return false;
+            // try to match the tail
+            let tailStart = file.length - tail.length;
+            if (this.#matchOne(file, tail, partial, tailStart, 0)) {
+                fileTailMatch = tail.length;
+            }
+            else {
+                // affordance for stuff like a/**/* matching a/b/
+                // if the last file portion is '', and there's more to the pattern
+                // then try without the '' bit.
+                if (file[file.length - 1] !== '' ||
+                    fileIndex + tail.length === file.length) {
+                    return false;
+                }
+                tailStart--;
+                if (!this.#matchOne(file, tail, partial, tailStart, 0)) {
+                    return false;
+                }
+                fileTailMatch = tail.length + 1;
+            }
+        }
+        // now we know the tail matches!
+        // the middle is zero or more portions wrapped in **, possibly
+        // containing more ** sections.
+        // so a/**/b/**/c/**/d has become **/b/**/c/**
+        // if it's empty, it means a/**/b, just verify we have no bad dots
+        // if there's no tail, so it ends on /**, then we must have *something*
+        // after the head, or it's not a matc
+        if (!body.length) {
+            let sawSome = !!fileTailMatch;
+            for (let i = fileIndex; i < file.length - fileTailMatch; i++) {
+                const f = String(file[i]);
+                sawSome = true;
+                if (f === '.' ||
+                    f === '..' ||
+                    (!this.options.dot && f.startsWith('.'))) {
+                    return false;
+                }
+            }
+            // in partial mode, we just need to get past all file parts
+            return partial || sawSome;
+        }
+        // now we know that there's one or more body sections, which can
+        // be matched anywhere from the 0 index (because the head was pruned)
+        // through to the length-fileTailMatch index.
+        // split the body up into sections, and note the minimum index it can
+        // be found at (start with the length of all previous segments)
+        // [section, before, after]
+        const bodySegments = [[[], 0]];
+        let currentBody = bodySegments[0];
+        let nonGsParts = 0;
+        const nonGsPartsSums = [0];
+        for (const b of body) {
+            if (b === exports.GLOBSTAR) {
+                nonGsPartsSums.push(nonGsParts);
+                currentBody = [[], 0];
+                bodySegments.push(currentBody);
+            }
+            else {
+                currentBody[0].push(b);
+                nonGsParts++;
+            }
+        }
+        let i = bodySegments.length - 1;
+        const fileLength = file.length - fileTailMatch;
+        for (const b of bodySegments) {
+            b[1] = fileLength - (nonGsPartsSums[i--] + b[0].length);
+        }
+        return !!this.#matchGlobStarBodySections(file, bodySegments, fileIndex, 0, partial, 0, !!fileTailMatch);
+    }
+    // return false for "nope, not matching"
+    // return null for "not matching, cannot keep trying"
+    #matchGlobStarBodySections(file, 
+    // pattern section, last possible position for it
+    bodySegments, fileIndex, bodyIndex, partial, globStarDepth, sawTail) {
+        // take the first body segment, and walk from fileIndex to its "after"
+        // value at the end
+        // If it doesn't match at that position, we increment, until we hit
+        // that final possible position, and give up.
+        // If it does match, then advance and try to rest.
+        // If any of them fail we keep walking forward.
+        // this is still a bit recursively painful, but it's more constrained
+        // than previous implementations, because we never test something that
+        // can't possibly be a valid matching condition.
+        const bs = bodySegments[bodyIndex];
+        if (!bs) {
+            // just make sure that there's no bad dots
+            for (let i = fileIndex; i < file.length; i++) {
+                sawTail = true;
+                const f = file[i];
+                if (f === '.' ||
+                    f === '..' ||
+                    (!this.options.dot && f.startsWith('.'))) {
+                    return false;
+                }
+            }
+            return sawTail;
+        }
+        // have a non-globstar body section to test
+        const [body, after] = bs;
+        while (fileIndex <= after) {
+            const m = this.#matchOne(file.slice(0, fileIndex + body.length), body, partial, fileIndex, 0);
+            // if limit exceeded, no match. intentional false negative,
+            // acceptable break in correctness for security.
+            if (m && globStarDepth < this.maxGlobstarRecursion) {
+                // match! see if the rest match. if so, we're done!
+                const sub = this.#matchGlobStarBodySections(file, bodySegments, fileIndex + body.length, bodyIndex + 1, partial, globStarDepth + 1, sawTail);
+                if (sub !== false) {
+                    return sub;
+                }
+            }
+            const f = file[fileIndex];
+            if (f === '.' ||
+                f === '..' ||
+                (!this.options.dot && f.startsWith('.'))) {
+                return false;
+            }
+            fileIndex++;
+        }
+        // walked off. no point continuing
+        return partial || null;
+    }
+    #matchOne(file, pattern, partial, fileIndex, patternIndex) {
+        let fi;
+        let pi;
+        let pl;
+        let fl;
+        for (fi = fileIndex,
+            pi = patternIndex,
+            fl = file.length,
+            pl = pattern.length; fi < fl && pi < pl; fi++, pi++) {
+            this.debug('matchOne loop');
+            let p = pattern[pi];
+            let f = file[fi];
+            this.debug(pattern, p, f);
+            // should be impossible.
+            // some invalid regexp stuff in the set.
+            /* c8 ignore start */
+            if (p === false || p === exports.GLOBSTAR) {
+                return false;
+            }
+            /* c8 ignore stop */
+            // something other than **
+            // non-magic patterns just have to match exactly
+            // patterns with magic have been turned into regexps.
+            let hit;
+            if (typeof p === 'string') {
+                hit = f === p;
+                this.debug('string match', p, f, hit);
+            }
+            else {
+                hit = p.test(f);
+                this.debug('pattern match', p, f, hit);
+            }
+            if (!hit)
+                return false;
+        }
+        // Note: ending in / means that we'll get a final ""
+        // at the end of the pattern.  This can only match a
+        // corresponding "" at the end of the file.
+        // If the file ends in /, then it can only match a
+        // a pattern that ends in /, unless the pattern just
+        // doesn't have any more for it. But, a/b/ should *not*
+        // match "a/b/*", even though "" matches against the
+        // [^/]*? pattern, except in partial mode, where it might
+        // simply not be reached yet.
+        // However, a/b/ should still satisfy a/*
+        // now either we fell off the end of the pattern, or we're done.
+        if (fi === fl && pi === pl) {
+            // ran out of pattern and filename at the same time.
+            // an exact hit!
+            return true;
+        }
+        else if (fi === fl) {
+            // ran out of file, but still had pattern left.
+            // this is ok if we're doing the match as part of
+            // a glob fs traversal.
+            return partial;
+        }
+        else if (pi === pl) {
+            // ran out of pattern, still have file left.
+            // this is only acceptable if we're on the very last
+            // empty segment of a file with a trailing slash.
+            // a/* should match a/b/
+            return fi === fl - 1 && file[fi] === '';
+            /* c8 ignore start */
+        }
+        else {
+            // should be unreachable.
+            throw new Error('wtf?');
+        }
+        /* c8 ignore stop */
+    }
+    braceExpand() {
+        return (0, exports.braceExpand)(this.pattern, this.options);
+    }
+    parse(pattern) {
+        (0, assert_valid_pattern_js_1.assertValidPattern)(pattern);
+        const options = this.options;
+        // shortcuts
+        if (pattern === '**')
+            return exports.GLOBSTAR;
+        if (pattern === '')
+            return '';
+        // far and away, the most common glob pattern parts are
+        // *, *.*, and *.<ext>  Add a fast check method for those.
+        let m;
+        let fastTest = null;
+        if ((m = pattern.match(starRE))) {
+            fastTest = options.dot ? starTestDot : starTest;
+        }
+        else if ((m = pattern.match(starDotExtRE))) {
+            fastTest = (options.nocase ?
+                options.dot ?
+                    starDotExtTestNocaseDot
+                    : starDotExtTestNocase
+                : options.dot ? starDotExtTestDot
+                    : starDotExtTest)(m[1]);
+        }
+        else if ((m = pattern.match(qmarksRE))) {
+            fastTest = (options.nocase ?
+                options.dot ?
+                    qmarksTestNocaseDot
+                    : qmarksTestNocase
+                : options.dot ? qmarksTestDot
+                    : qmarksTest)(m);
+        }
+        else if ((m = pattern.match(starDotStarRE))) {
+            fastTest = options.dot ? starDotStarTestDot : starDotStarTest;
+        }
+        else if ((m = pattern.match(dotStarRE))) {
+            fastTest = dotStarTest;
+        }
+        const re = ast_js_1.AST.fromGlob(pattern, this.options).toMMPattern();
+        if (fastTest && typeof re === 'object') {
+            // Avoids overriding in frozen environments
+            Reflect.defineProperty(re, 'test', { value: fastTest });
+        }
+        return re;
+    }
+    makeRe() {
+        if (this.regexp || this.regexp === false)
+            return this.regexp;
+        // at this point, this.set is a 2d array of partial
+        // pattern strings, or "**".
+        //
+        // It's better to use .match().  This function shouldn't
+        // be used, really, but it's pretty convenient sometimes,
+        // when you just want to work with a regex.
+        const set = this.set;
+        if (!set.length) {
+            this.regexp = false;
+            return this.regexp;
+        }
+        const options = this.options;
+        const twoStar = options.noglobstar ? star
+            : options.dot ? twoStarDot
+                : twoStarNoDot;
+        const flags = new Set(options.nocase ? ['i'] : []);
+        // regexpify non-globstar patterns
+        // if ** is only item, then we just do one twoStar
+        // if ** is first, and there are more, prepend (\/|twoStar\/)? to next
+        // if ** is last, append (\/twoStar|) to previous
+        // if ** is in the middle, append (\/|\/twoStar\/) to previous
+        // then filter out GLOBSTAR symbols
+        let re = set
+            .map(pattern => {
+            const pp = pattern.map(p => {
+                if (p instanceof RegExp) {
+                    for (const f of p.flags.split(''))
+                        flags.add(f);
+                }
+                return (typeof p === 'string' ? regExpEscape(p)
+                    : p === exports.GLOBSTAR ? exports.GLOBSTAR
+                        : p._src);
+            });
+            pp.forEach((p, i) => {
+                const next = pp[i + 1];
+                const prev = pp[i - 1];
+                if (p !== exports.GLOBSTAR || prev === exports.GLOBSTAR) {
+                    return;
+                }
+                if (prev === undefined) {
+                    if (next !== undefined && next !== exports.GLOBSTAR) {
+                        pp[i + 1] = '(?:\\/|' + twoStar + '\\/)?' + next;
+                    }
+                    else {
+                        pp[i] = twoStar;
+                    }
+                }
+                else if (next === undefined) {
+                    pp[i - 1] = prev + '(?:\\/|\\/' + twoStar + ')?';
+                }
+                else if (next !== exports.GLOBSTAR) {
+                    pp[i - 1] = prev + '(?:\\/|\\/' + twoStar + '\\/)' + next;
+                    pp[i + 1] = exports.GLOBSTAR;
+                }
+            });
+            const filtered = pp.filter(p => p !== exports.GLOBSTAR);
+            // For partial matches, we need to make the pattern match
+            // any prefix of the full path. We do this by generating
+            // alternative patterns that match progressively longer prefixes.
+            if (this.partial && filtered.length >= 1) {
+                const prefixes = [];
+                for (let i = 1; i <= filtered.length; i++) {
+                    prefixes.push(filtered.slice(0, i).join('/'));
+                }
+                return '(?:' + prefixes.join('|') + ')';
+            }
+            return filtered.join('/');
+        })
+            .join('|');
+        // need to wrap in parens if we had more than one thing with |,
+        // otherwise only the first will be anchored to ^ and the last to $
+        const [open, close] = set.length > 1 ? ['(?:', ')'] : ['', ''];
+        // must match entire pattern
+        // ending in a * or ** will make it less strict.
+        re = '^' + open + re + close + '$';
+        // In partial mode, '/' should always match as it's a valid prefix for any pattern
+        if (this.partial) {
+            re = '^(?:\\/|' + open + re.slice(1, -1) + close + ')$';
+        }
+        // can match anything, as long as it's not this.
+        if (this.negate)
+            re = '^(?!' + re + ').+$';
+        try {
+            this.regexp = new RegExp(re, [...flags].join(''));
+            /* c8 ignore start */
+        }
+        catch {
+            // should be impossible
+            this.regexp = false;
+        }
+        /* c8 ignore stop */
+        return this.regexp;
+    }
+    slashSplit(p) {
+        // if p starts with // on windows, we preserve that
+        // so that UNC paths aren't broken.  Otherwise, any number of
+        // / characters are coalesced into one, unless
+        // preserveMultipleSlashes is set to true.
+        if (this.preserveMultipleSlashes) {
+            return p.split('/');
+        }
+        else if (this.isWindows && /^\/\/[^/]+/.test(p)) {
+            // add an extra '' for the one we lose
+            return ['', ...p.split(/\/+/)];
+        }
+        else {
+            return p.split(/\/+/);
+        }
+    }
+    match(f, partial = this.partial) {
+        this.debug('match', f, this.pattern);
+        // short-circuit in the case of busted things.
+        // comments, etc.
+        if (this.comment) {
+            return false;
+        }
+        if (this.empty) {
+            return f === '';
+        }
+        if (f === '/' && partial) {
+            return true;
+        }
+        const options = this.options;
+        // windows: need to use /, not \
+        if (this.isWindows) {
+            f = f.split('\\').join('/');
+        }
+        // treat the test path as a set of pathparts.
+        const ff = this.slashSplit(f);
+        this.debug(this.pattern, 'split', ff);
+        // just ONE of the pattern sets in this.set needs to match
+        // in order for it to be valid.  If negating, then just one
+        // match means that we have failed.
+        // Either way, return on the first hit.
+        const set = this.set;
+        this.debug(this.pattern, 'set', set);
+        // Find the basename of the path by looking for the last non-empty segment
+        let filename = ff[ff.length - 1];
+        if (!filename) {
+            for (let i = ff.length - 2; !filename && i >= 0; i--) {
+                filename = ff[i];
+            }
+        }
+        for (const pattern of set) {
+            let file = ff;
+            if (options.matchBase && pattern.length === 1) {
+                file = [filename];
+            }
+            const hit = this.matchOne(file, pattern, partial);
+            if (hit) {
+                if (options.flipNegate) {
+                    return true;
+                }
+                return !this.negate;
+            }
+        }
+        // didn't get any hits.  this is success if it's a negative
+        // pattern, failure otherwise.
+        if (options.flipNegate) {
+            return false;
+        }
+        return this.negate;
+    }
+    static defaults(def) {
+        return exports.minimatch.defaults(def).Minimatch;
+    }
+}
+exports.Minimatch = Minimatch;
+/* c8 ignore start */
+var ast_js_2 = __nccwpck_require__(29530);
+Object.defineProperty(exports, "AST", ({ enumerable: true, get: function () { return ast_js_2.AST; } }));
+var escape_js_2 = __nccwpck_require__(67733);
+Object.defineProperty(exports, "escape", ({ enumerable: true, get: function () { return escape_js_2.escape; } }));
+var unescape_js_2 = __nccwpck_require__(49850);
+Object.defineProperty(exports, "unescape", ({ enumerable: true, get: function () { return unescape_js_2.unescape; } }));
+/* c8 ignore stop */
+exports.minimatch.AST = ast_js_1.AST;
+exports.minimatch.Minimatch = Minimatch;
+exports.minimatch.escape = escape_js_1.escape;
+exports.minimatch.unescape = unescape_js_1.unescape;
+//# sourceMappingURL=index.js.map
+
+/***/ }),
+
+/***/ 49850:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.unescape = void 0;
+/**
+ * Un-escape a string that has been escaped with {@link escape}.
+ *
+ * If the {@link MinimatchOptions.windowsPathsNoEscape} option is used, then
+ * square-bracket escapes are removed, but not backslash escapes.
+ *
+ * For example, it will turn the string `'[*]'` into `*`, but it will not
+ * turn `'\\*'` into `'*'`, because `\` is a path separator in
+ * `windowsPathsNoEscape` mode.
+ *
+ * When `windowsPathsNoEscape` is not set, then both square-bracket escapes and
+ * backslash escapes are removed.
+ *
+ * Slashes (and backslashes in `windowsPathsNoEscape` mode) cannot be escaped
+ * or unescaped.
+ *
+ * When `magicalBraces` is not set, escapes of braces (`{` and `}`) will not be
+ * unescaped.
+ */
+const unescape = (s, { windowsPathsNoEscape = false, magicalBraces = true, } = {}) => {
+    if (magicalBraces) {
+        return windowsPathsNoEscape ?
+            s.replace(/\[([^/\\])\]/g, '$1')
+            : s
+                .replace(/((?!\\).|^)\[([^/\\])\]/g, '$1$2')
+                .replace(/\\([^/])/g, '$1');
+    }
+    return windowsPathsNoEscape ?
+        s.replace(/\[([^/\\{}])\]/g, '$1')
+        : s
+            .replace(/((?!\\).|^)\[([^/\\{}])\]/g, '$1$2')
+            .replace(/\\([^/{}])/g, '$1');
+};
+exports.unescape = unescape;
+//# sourceMappingURL=unescape.js.map
 
 /***/ }),
 
@@ -105762,7 +104460,7 @@ exports.JSONPath = JSONPath;
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"i8":"17.6.0"};
+module.exports = {"i8":"17.11.2"};
 
 /***/ }),
 
@@ -105770,7 +104468,7 @@ module.exports = {"i8":"17.6.0"};
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse('{"$schema":"http://json-schema.org/draft-07/schema#","title":"release-please manifest config schema","description":"Schema for defining manifest config file","type":"object","additionalProperties":false,"definitions":{"ReleaserConfigOptions":{"type":"object","properties":{"release-type":{"description":"The strategy to use for this component.","type":"string"},"bump-minor-pre-major":{"description":"Breaking changes only bump semver minor if version < 1.0.0","type":"boolean"},"bump-patch-for-minor-pre-major":{"description":"Feature changes only bump semver patch if version < 1.0.0","type":"boolean"},"prerelease-type":{"description":"Configuration option for the prerelease versioning strategy. If prerelease strategy used and type set, will set the prerelease part of the version to the provided value in case prerelease part is not present.","type":"string"},"versioning":{"description":"Versioning strategy. Defaults to `default`","type":"string"},"changelog-sections":{"description":"Override the Changelog configuration sections","type":"array","items":{"type":"object","properties":{"type":{"description":"Semantic commit type (e.g. `feat`, `chore`)","type":"string"},"section":{"description":"Changelog section title","type":"string"},"hidden":{"description":"Skip displaying this type of commit. Defaults to `false`.","type":"boolean"}},"required":["type","section"]}},"release-as":{"description":"[DEPRECATED] Override the next version of this package. Consider using a `Release-As` commit instead.","type":"string"},"skip-github-release":{"description":"Skip tagging GitHub releases for this package. Release-Please still requires releases to be tagged, so this option should only be used if you have existing infrastructure to tag these releases.Defaults to `false`.","type":"boolean"},"skip-changelog":{"description":"Skip generating a changelog for this package. Defaults to `false`.","type":"boolean"},"draft":{"description":"Create the GitHub release in draft mode. Defaults to `false`.","type":"boolean"},"force-tag-creation":{"description":"Force the creation of a Git tag for the release. This is particularly useful when `draft` is enabled, because GitHub does not create a Git tag for draft releases until they are published. This \'lazy tag creation\' causes release-please to fail to find the previous release, potentially generating incorrect changelogs. Setting this to `true` ensures the tag is created immediately. Defaults to `false`.","type":"boolean"},"prerelease":{"description":"Create the GitHub release as prerelease. Defaults to `false`.","type":"boolean"},"draft-pull-request":{"description":"Open the release pull request in draft mode. Defaults to `false`.","type":"boolean"},"extra-label":{"description":"Comma-separated list of labels to add to a newly opened pull request","type":"string"},"include-component-in-tag":{"description":"When tagging a release, include the component name as part of the tag. Defaults to `true`.","type":"boolean"},"include-v-in-tag":{"description":"When tagging a release, include `v` in the tag. Defaults to `true`.","type":"boolean"},"include-v-in-release-name":{"description":"Include `v` in the GitHub release name. Defaults to `true`.","type":"boolean"},"changelog-type":{"description":"The type of changelog to use. Defaults to `default`.","type":"string","enum":["default","github"]},"changelog-host":{"description":"Generate changelog links to this GitHub host. Useful for running against GitHub Enterprise.","type":"string"},"changelog-path":{"description":"Path to the file that tracks release note changes. Defaults to `CHANGELOG.md`.","type":"string"},"pull-request-title-pattern":{"description":"Customize the release pull request title.","type":"string"},"pull-request-header":{"description":"Customize the release pull request header.","type":"string"},"pull-request-footer":{"description":"Customize the release pull request footer.","type":"string"},"separate-pull-requests":{"description":"Open a separate release pull request for each component. Defaults to `false`.","type":"boolean"},"always-update":{"description":"Always update the pull request with the latest changes. Defaults to `false`.","type":"boolean"},"tag-separator":{"description":"Customize the separator between the component and version in the GitHub tag.","type":"string"},"date-format":{"description":"Date format given as a strftime expression for the generic strategy.","type":"string"},"extra-files":{"description":"Specify extra generic files to replace versions.","type":"array","items":{"anyOf":[{"description":"The path to the file. The `Generic` updater uses annotations to replace versions.","type":"string"},{"description":"An extra JSON, YAML, or TOML file with a targeted update via jsonpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["json","toml","yaml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"jsonpath":{"description":"The jsonpath to the version entry in the file.","type":"string"}},"required":["type","path","jsonpath"]},{"description":"An extra XML file with a targeted update via xpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["xml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"xpath":{"description":"The xpath to the version entry in the file.","type":"string"}},"required":["type","path","xpath"]},{"description":"An extra pom.xml file.","type":"object","properties":{"type":{"description":"The file format type.","enum":["pom"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]},{"description":"An extra arbitrary file that includes release-please generic updater\'s annotation.","type":"object","properties":{"type":{"description":"The file format type.","enum":["generic"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]}]}},"exclude-paths":{"description":"Path of commits to be excluded from parsing. If all files from commit belong to one of the paths it will be skipped","type":"array","items":{"type":"string"}},"version-file":{"description":"Path to the specialize version file. Used by `ruby` and `simple` strategies.","type":"string"},"snapshot-label":{"description":"Label to add to snapshot pull request. Used by `java` strategies.","type":"string"},"skip-snapshot":{"description":"If set, do not propose snapshot pull requests. Used by `java` strategies.","type":"boolean"},"initial-version":{"description":"Releases the initial library with a specified version","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}}}},"allOf":[{"$ref":"#/definitions/ReleaserConfigOptions"},{"properties":{"$schema":{"description":"Path to the release-please manifest config schema","type":"string","format":"uri-reference"},"packages":{"description":"Per-path component configuration.","type":"object","additionalProperties":{"$ref":"#/definitions/ReleaserConfigOptions"}},"bootstrap-sha":{"description":"For the initial release of a library, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"last-release-sha":{"description":"For any release, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"always-link-local":{"description":"When using the `node-workspace` plugin, force all local dependencies to be linked.","type":"boolean"},"plugins":{"description":"Plugins to apply to pull requests. Plugins can be added to perform extra release processing that cannot be achieved by an individual release strategy.","type":"array","items":{"anyOf":[{"description":"The plugin name for plugins that do not require other options.","type":"string"},{"description":"Configuration for the `linked-versions` plugin.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["linked-versions"]},"groupName":{"description":"The name of the group of components.","type":"string"},"components":{"description":"List of component names that are part of this group.","type":"array","items":{"type":"string"}},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"specialWords":{"description":"Words that sentence casing logic will not be applied to","type":"array","items":{"type":"string"}}},"required":["type","groupName","components"]},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["cargo-workspace","maven-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"}}},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["node-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"},"updatePeerDependencies":{"description":"Also bump peer dependency versions if they are modified. Defaults to `false`.","type":"boolean"}}},{"description":"Configuration for various `group-priority` plugin","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["group-priority"]},"groups":{"description":"Group names ordered with highest priority first.","type":"array","items":{"type":"string"}}}},{"description":"Other plugins","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string"}}}]}},"signoff":{"description":"Text to be used as Signed-off-by in the commit.","type":"string"},"group-pull-request-title-pattern":{"description":"When grouping multiple release pull requests use this pattern for the title.","type":"string"},"release-search-depth":{"description":"When considering previously releases, only look this deep.","type":"number"},"commit-search-depth":{"description":"When considering commit history, only look this many commits deep.","type":"number"},"commit-batch-size":{"description":"Number of commits to fetch per API request when searching commit history. Lower values result in more API calls but may help avoid timeouts. Defaults to 10.","type":"number"},"sequential-calls":{"description":"Whether to open pull requests/releases sequentially rather than concurrently. If you have many components, you may want to set this to avoid secondary rate limits.","type":"boolean"},"label":{"description":"Comma-separated list of labels to add to newly opened pull request. These are used to identify release pull requests.","type":"string"},"release-label":{"description":"Comma-separated list of labels to add to a pull request that has been released/tagged","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}},"required":["packages"]}],"properties":{"$schema":true,"packages":true,"bootstrap-sha":true,"last-release-sha":true,"always-link-local":true,"plugins":true,"signoff":true,"group-pull-request-title-pattern":true,"release-search-depth":true,"commit-search-depth":true,"commit-batch-size":true,"sequential-calls":true,"release-type":true,"bump-minor-pre-major":true,"bump-patch-for-minor-pre-major":true,"versioning":true,"changelog-sections":true,"release-as":true,"skip-github-release":true,"skip-changelog":true,"draft":true,"force-tag-creation":true,"prerelease":true,"draft-pull-request":true,"label":true,"release-label":true,"extra-label":true,"include-component-in-tag":true,"include-v-in-tag":true,"include-v-in-release-name":true,"changelog-type":true,"changelog-host":true,"changelog-path":true,"pull-request-title-pattern":true,"pull-request-header":true,"pull-request-footer":true,"separate-pull-requests":true,"always-update":true,"tag-separator":true,"date-format":true,"extra-files":true,"version-file":true,"snapshot-label":true,"initial-version":true,"exclude-paths":true,"component-no-space":false}}');
+module.exports = JSON.parse('{"$schema":"http://json-schema.org/draft-07/schema#","title":"release-please manifest config schema","description":"Schema for defining manifest config file","type":"object","additionalProperties":false,"definitions":{"ReleaserConfigOptions":{"type":"object","properties":{"release-type":{"description":"The strategy to use for this component.","type":"string"},"bump-minor-pre-major":{"description":"Breaking changes only bump semver minor if version < 1.0.0","type":"boolean"},"bump-patch-for-minor-pre-major":{"description":"Feature changes only bump semver patch if version < 1.0.0","type":"boolean"},"prerelease-type":{"description":"Configuration option for the prerelease versioning strategy. If prerelease strategy used and type set, will set the prerelease part of the version to the provided value in case prerelease part is not present.","type":"string"},"versioning":{"description":"Versioning strategy. Defaults to `default`","type":"string"},"changelog-sections":{"description":"Override the Changelog configuration sections","type":"array","items":{"type":"object","properties":{"type":{"description":"Semantic commit type (e.g. `feat`, `chore`)","type":"string"},"section":{"description":"Changelog section title","type":"string"},"hidden":{"description":"Skip displaying this type of commit. Defaults to `false`.","type":"boolean"}},"required":["type","section"]}},"release-as":{"description":"[DEPRECATED] Override the next version of this package. Consider using a `Release-As` commit instead.","type":"string"},"skip-github-release":{"description":"Skip tagging GitHub releases for this package. Release-Please still requires releases to be tagged, so this option should only be used if you have existing infrastructure to tag these releases.Defaults to `false`.","type":"boolean"},"skip-changelog":{"description":"Skip generating a changelog for this package. Defaults to `false`.","type":"boolean"},"draft":{"description":"Create the GitHub release in draft mode. Defaults to `false`.","type":"boolean"},"force-tag-creation":{"description":"Force the creation of a Git tag for the release. This is particularly useful when `draft` is enabled, because GitHub does not create a Git tag for draft releases until they are published. This \'lazy tag creation\' causes release-please to fail to find the previous release, potentially generating incorrect changelogs. Setting this to `true` ensures the tag is created immediately. Defaults to `false`.","type":"boolean"},"prerelease":{"description":"Create the GitHub release as prerelease. Defaults to `false`.","type":"boolean"},"draft-pull-request":{"description":"Open the release pull request in draft mode. Defaults to `false`.","type":"boolean"},"extra-label":{"description":"Comma-separated list of labels to add to a newly opened pull request","type":"string"},"include-component-in-tag":{"description":"When tagging a release, include the component name as part of the tag. Defaults to `true`.","type":"boolean"},"include-v-in-tag":{"description":"When tagging a release, include `v` in the tag. Defaults to `true`.","type":"boolean"},"include-v-in-release-name":{"description":"Include `v` in the GitHub release name. Defaults to `true`.","type":"boolean"},"changelog-type":{"description":"The type of changelog to use. Defaults to `default`.","type":"string","enum":["default","github"]},"changelog-host":{"description":"Generate changelog links to this GitHub host. Useful for running against GitHub Enterprise.","type":"string"},"changelog-path":{"description":"Path to the file that tracks release note changes. Defaults to `CHANGELOG.md`.","type":"string"},"pull-request-title-pattern":{"description":"Customize the release pull request title.","type":"string"},"pull-request-header":{"description":"Customize the release pull request header.","type":"string"},"pull-request-footer":{"description":"Customize the release pull request footer.","type":"string"},"separate-pull-requests":{"description":"Open a separate release pull request for each component. Defaults to `false`.","type":"boolean"},"always-update":{"description":"Always update the pull request with the latest changes. Defaults to `false`.","type":"boolean"},"tag-separator":{"description":"Customize the separator between the component and version in the GitHub tag.","type":"string"},"date-format":{"description":"Date format given as a strftime expression for the generic strategy.","type":"string"},"extra-files":{"description":"Specify extra generic files to replace versions.","type":"array","items":{"anyOf":[{"description":"The path to the file. The `Generic` updater uses annotations to replace versions.","type":"string"},{"description":"An extra JSON, YAML, or TOML file with a targeted update via jsonpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["json","toml","yaml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"jsonpath":{"description":"The jsonpath to the version entry in the file.","type":"string"}},"required":["type","path","jsonpath"]},{"description":"An extra XML file with a targeted update via xpath.","type":"object","properties":{"type":{"description":"The file format type.","enum":["xml"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"},"xpath":{"description":"The xpath to the version entry in the file.","type":"string"}},"required":["type","path","xpath"]},{"description":"An extra pom.xml file.","type":"object","properties":{"type":{"description":"The file format type.","enum":["pom"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]},{"description":"An extra arbitrary file that includes release-please generic updater\'s annotation.","type":"object","properties":{"type":{"description":"The file format type.","enum":["generic"]},"path":{"description":"The path to the file.","type":"string"},"glob":{"description":"Whether to treat the path as a glob. Defaults to `false`.","type":"boolean"}},"required":["type","path"]}]}},"exclude-paths":{"description":"Path of commits to be excluded from parsing. If all files from commit belong to one of the paths it will be skipped","type":"array","items":{"type":"string"}},"version-file":{"description":"Path to the specialize version file. Used by `ruby` and `simple` strategies.","type":"string"},"snapshot-label":{"description":"Label to add to snapshot pull request. Used by `java` strategies.","type":"string"},"skip-snapshot":{"description":"If set, do not propose snapshot pull requests. Used by `java` strategies.","type":"boolean"},"initial-version":{"description":"Releases the initial library with a specified version","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}}}},"allOf":[{"$ref":"#/definitions/ReleaserConfigOptions"},{"properties":{"$schema":{"description":"Path to the release-please manifest config schema","type":"string","format":"uri-reference"},"packages":{"description":"Per-path component configuration.","type":"object","additionalProperties":{"$ref":"#/definitions/ReleaserConfigOptions"}},"bootstrap-sha":{"description":"For the initial release of a library, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"last-release-sha":{"description":"For any release, only consider as far back as this commit SHA. This is an uncommon use case and should generally be avoided.","type":"string"},"always-link-local":{"description":"When using the `node-workspace` plugin, force all local dependencies to be linked.","type":"boolean"},"plugins":{"description":"Plugins to apply to pull requests. Plugins can be added to perform extra release processing that cannot be achieved by an individual release strategy.","type":"array","items":{"anyOf":[{"description":"The plugin name for plugins that do not require other options.","type":"string"},{"description":"Configuration for the `linked-versions` plugin.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["linked-versions"]},"groupName":{"description":"The name of the group of components.","type":"string"},"components":{"description":"List of component names that are part of this group.","type":"array","items":{"type":"string"}},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"specialWords":{"description":"Words that sentence casing logic will not be applied to","type":"array","items":{"type":"string"}}},"required":["type","groupName","components"]},{"description":"Configuration for the `cargo-workspace` plugin.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["cargo-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"cargoWorkspacePath":{"description":"Path to the directory containing the workspace Cargo.toml. Defaults to the repository root.","type":"string"}}},{"description":"Configuration for the `maven-workspace` plugin.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["maven-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"}}},{"description":"Configuration for various `workspace` plugins.","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["node-workspace"]},"updateAllPackages":{"description":"Whether to force updating all packages regardless of the dependency tree. Defaults to `false`.","type":"boolean"},"merge":{"description":"Whether to merge in-scope pull requests into a combined release pull request. Defaults to `true`.","type":"boolean"},"considerAllArtifacts":{"description":"Whether to analyze all packages in the workspace for cross-component version bumping. This currently only works for the maven-workspace plugin. Defaults to `true`.","type":"boolean"},"updatePeerDependencies":{"description":"Also bump peer dependency versions if they are modified. Defaults to `false`.","type":"boolean"}}},{"description":"Directed release dependencies between independently versioned manifest packages, including packages in different workspaces.","type":"object","properties":{"type":{"type":"string","enum":["release-dependencies"]},"rules":{"type":"array","minItems":1,"items":{"type":"object","properties":{"source":{"description":"Source manifest package path.","type":"string","minLength":1},"dependent":{"description":"Dependent manifest package path.","type":"string","minLength":1},"minimumBump":{"description":"Minimum dependent version increase, independent of the source version. Defaults to patch.","enum":["patch","minor","major"]}},"required":["source","dependent"],"additionalProperties":false}}},"required":["type","rules"],"additionalProperties":false},{"description":"Configuration for various `group-priority` plugin","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","enum":["group-priority"]},"groups":{"description":"Group names ordered with highest priority first.","type":"array","items":{"type":"string"}}}},{"description":"Other plugins","type":"object","properties":{"type":{"description":"The name of the plugin.","type":"string","not":{"enum":["release-dependencies"]}}}}]}},"signoff":{"description":"Text to be used as Signed-off-by in the commit.","type":"string"},"group-pull-request-title-pattern":{"description":"When grouping multiple release pull requests use this pattern for the title.","type":"string"},"release-search-depth":{"description":"When considering previously releases, only look this deep.","type":"number"},"commit-search-depth":{"description":"When considering commit history, only look this many commits deep.","type":"number"},"commit-batch-size":{"description":"Number of commits to fetch per API request when searching commit history. Lower values result in more API calls but may help avoid timeouts. Defaults to 10.","type":"number"},"sequential-calls":{"description":"Whether to open pull requests/releases sequentially rather than concurrently. If you have many components, you may want to set this to avoid secondary rate limits.","type":"boolean"},"label":{"description":"Comma-separated list of labels to add to newly opened pull request. These are used to identify release pull requests.","type":"string"},"release-label":{"description":"Comma-separated list of labels to add to a pull request that has been released/tagged","type":"string"},"component-no-space":{"description":"release-please automatically adds ` ` (space) in front of parsed ${component}. This option indicates whether that behaviour should be disabled. Defaults to `false`","type":"boolean"}},"required":["packages"]}],"properties":{"$schema":true,"packages":true,"bootstrap-sha":true,"last-release-sha":true,"always-link-local":true,"plugins":true,"signoff":true,"group-pull-request-title-pattern":true,"release-search-depth":true,"commit-search-depth":true,"commit-batch-size":true,"sequential-calls":true,"release-type":true,"bump-minor-pre-major":true,"bump-patch-for-minor-pre-major":true,"versioning":true,"changelog-sections":true,"release-as":true,"skip-github-release":true,"skip-changelog":true,"draft":true,"force-tag-creation":true,"prerelease":true,"draft-pull-request":true,"label":true,"release-label":true,"extra-label":true,"include-component-in-tag":true,"include-v-in-tag":true,"include-v-in-release-name":true,"changelog-type":true,"changelog-host":true,"changelog-path":true,"pull-request-title-pattern":true,"pull-request-header":true,"pull-request-footer":true,"separate-pull-requests":true,"always-update":true,"tag-separator":true,"date-format":true,"extra-files":true,"version-file":true,"snapshot-label":true,"initial-version":true,"exclude-paths":true,"component-no-space":false}}');
 
 /***/ }),
 
@@ -105917,7 +104615,8 @@ function loadOrBuildManifest(github, inputs) {
     core.debug('Loading manifest from config file');
     return release_please_1.Manifest.fromManifest(github, github.repository.defaultBranch, inputs.configFile, inputs.manifestFile, manifestOverrides).then(manifest => {
         // Override changelogHost for all paths if provided as action input and different from default
-        if (inputs.changelogHost && inputs.changelogHost !== DEFAULT_GITHUB_SERVER_URL) {
+        if (inputs.changelogHost &&
+            inputs.changelogHost !== DEFAULT_GITHUB_SERVER_URL) {
             core.debug(`Overriding changelogHost to: ${inputs.changelogHost}`);
             for (const path in manifest.repositoryConfig) {
                 manifest.repositoryConfig[path].changelogHost = inputs.changelogHost;
