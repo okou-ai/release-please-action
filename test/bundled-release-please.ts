@@ -89,7 +89,13 @@ describe('bundled release-please-action', () => {
           });
 
         if (method === 'GET') {
-          if (path === '/repos/fake-owner/fake-repo/git/trees/main') {
+          if (path === '/repos/fake-owner/fake-repo/git/ref/heads/main') {
+            return json({
+              ref: 'refs/heads/main',
+              object: {type: 'commit', sha: releaseSha},
+            });
+          }
+          if (path === `/repos/fake-owner/fake-repo/git/trees/${releaseSha}`) {
             return json({
               truncated: false,
               tree: [
@@ -144,44 +150,44 @@ describe('bundled release-please-action', () => {
           }
         }
         if (method === 'POST' && path === '/graphql') {
-          const {query} = JSON.parse(options.body || '{}');
+          const {query, variables} = JSON.parse(options.body || '{}');
           if (query.includes('query releases(')) {
             return json({
               data: {repository: {releases: {nodes: []}}},
             });
           }
           if (query.includes('query pullRequestsSince(')) {
+            assert.ok(query.includes('object(expression: $targetBranch)'));
+            assert.strictEqual(variables.targetBranch, releaseSha);
             return json({
               data: {
                 repository: {
-                  ref: {
-                    target: {
-                      history: {
-                        nodes: [
-                          {
-                            sha: releaseSha,
-                            message: 'chore: release 1.0.0',
-                            associatedPullRequests: {
-                              nodes: [
-                                {
-                                  number: 20,
-                                  title: 'chore: release 1.0.0',
-                                  body: '',
-                                  baseRefName: 'main',
-                                  headRefName: 'release-please--branches--main',
-                                  mergeCommit: {oid: releaseSha},
-                                  labels: {nodes: []},
-                                  files: {
-                                    nodes: [],
-                                    pageInfo: {hasNextPage: false},
-                                  },
+                  object: {
+                    history: {
+                      nodes: [
+                        {
+                          sha: releaseSha,
+                          message: 'chore: release 1.0.0',
+                          associatedPullRequests: {
+                            nodes: [
+                              {
+                                number: 20,
+                                title: 'chore: release 1.0.0',
+                                body: '',
+                                baseRefName: 'main',
+                                headRefName: 'release-please--branches--main',
+                                mergeCommit: {oid: releaseSha},
+                                labels: {nodes: []},
+                                files: {
+                                  nodes: [],
+                                  pageInfo: {hasNextPage: false},
                                 },
-                              ],
-                            },
+                              },
+                            ],
                           },
-                        ],
-                        pageInfo: {hasNextPage: false},
-                      },
+                        },
+                      ],
+                      pageInfo: {hasNextPage: false},
                     },
                   },
                 },
@@ -197,6 +203,26 @@ describe('bundled release-please-action', () => {
       sinon.assert.calledWithMatch(
         stdout,
         'Running release-please version: 17.11.2'
+      );
+      assert.strictEqual(
+        requests.filter(
+          request =>
+            request === 'GET /repos/fake-owner/fake-repo/git/ref/heads/main'
+        ).length,
+        1
+      );
+      // Concurrent config/manifest loads can fetch the same tree more than once.
+      // Every request must still use the pinned source commit.
+      const treeReads = requests.filter(request =>
+        request.startsWith('GET /repos/fake-owner/fake-repo/git/trees/')
+      );
+      assert.ok(treeReads.length > 0);
+      assert.ok(
+        treeReads.every(
+          request =>
+            request ===
+            `GET /repos/fake-owner/fake-repo/git/trees/${releaseSha}`
+        )
       );
       assert.strictEqual(
         requests.filter(request => request.includes('/git/tags/')).length,

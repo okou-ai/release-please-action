@@ -42006,11 +42006,13 @@ class GitHubApi {
      * @param {string} newBranchName Name of the new branch
      * @param {string} baseBranchName Name of the base branch (where
      *   new branch is forked from)
+     * @param {string} baseSha Optional immutable source commit. Defaults to the
+     *   current base branch head when omitted.
      * @returns {string} HTML URL of the new file
      */
-    async createFileOnNewBranch(filename, contents, newBranchName, baseBranchName) {
-        // create or update new branch to match base branch
-        await this.forkBranch(newBranchName, baseBranchName);
+    async createFileOnNewBranch(filename, contents, newBranchName, baseBranchName, baseSha) {
+        // Create or update the branch at the source commit, or the base branch head.
+        await this.forkBranch(newBranchName, baseBranchName, baseSha);
         // use the single file upload API
         const { data: { content }, } = await this.octokit.repos.createOrUpdateFileContents({
             owner: this.repository.owner,
@@ -42026,8 +42028,8 @@ class GitHubApi {
     /**
      * Fork a branch from a base branch.
      */
-    async forkBranch(targetBranchName, baseBranchName) {
-        const baseBranchSha = await this.getBranchSha(baseBranchName);
+    async forkBranch(targetBranchName, baseBranchName, baseSha) {
+        const baseBranchSha = baseSha !== null && baseSha !== void 0 ? baseSha : (await this.getBranchSha(baseBranchName));
         if (!baseBranchSha) {
             throw new errors_1.ConfigurationError(`Unable to find base branch: ${baseBranchName}`, 'core', `${this.repository.owner}/${this.repository.repo}`);
         }
@@ -42153,6 +42155,7 @@ const composite_1 = __nccwpck_require__(40911);
 class GitHub {
     constructor(options) {
         var _a;
+        this.refShas = new Map();
         /**
          * Get the list of file paths modified in a given commit.
          *
@@ -42245,7 +42248,7 @@ class GitHub {
                 prefix = normalizePrefix(prefix);
             }
             this.logger.debug(`finding files by filename: ${filename}, ref: ${ref}, prefix: ${prefix}`);
-            return await this.fileCache.findFilesByFilename(filename, ref, prefix);
+            return await this.fileCache.findFilesByFilename(filename, await this.getRefSha(ref), prefix);
         });
         /**
          * Returns a list of paths to all files matching a glob pattern.
@@ -42263,7 +42266,7 @@ class GitHub {
                 prefix = normalizePrefix(prefix);
             }
             this.logger.debug(`finding files by glob: ${glob}, ref: ${ref}, prefix: ${prefix}`);
-            return await this.fileCache.findFilesByGlob(glob, ref, prefix);
+            return await this.fileCache.findFilesByGlob(glob, await this.getRefSha(ref), prefix);
         });
         /**
          * Returns a list of paths to all files with a given file
@@ -42283,7 +42286,7 @@ class GitHub {
             if (prefix) {
                 prefix = normalizePrefix(prefix);
             }
-            return this.fileCache.findFilesByExtension(extension, ref, prefix);
+            return this.fileCache.findFilesByExtension(extension, await this.getRefSha(ref), prefix);
         });
         this.repository = options.repository;
         this.octokit = options.octokitAPIs.octokit;
@@ -42298,6 +42301,75 @@ class GitHub {
     }
     getGitHubApi() {
         return this.gitHubApi;
+    }
+    // Resolve each ref once, including concurrent readers, so files, history and
+    // generated commits all use the same immutable repository snapshot.
+    getRefSha(ref) {
+        if (/^[a-f\d]{40}$/i.test(ref))
+            return Promise.resolve(ref);
+        const cached = this.refShas.get(ref);
+        if (cached)
+            return cached;
+        if (ref.startsWith('refs/') && !ref.startsWith('refs/heads/')) {
+            return this.getObjectSha(ref);
+        }
+        // Branch names and their fully qualified form identify the same snapshot.
+        // Keep the branch namespace separate from tags with the same name.
+        const branchRef = ref.startsWith('refs/heads/') ? ref : `refs/heads/${ref}`;
+        const snapshot = this.getCachedRefSha(branchRef, async () => {
+            var _a;
+            const { data } = await this.octokit.git.getRef({
+                owner: this.repository.owner,
+                repo: this.repository.repo,
+                ref: branchRef.slice('refs/'.length),
+            });
+            return (_a = data.object) === null || _a === void 0 ? void 0 : _a.sha;
+        });
+        if (ref === branchRef)
+            return snapshot;
+        return snapshot.catch(error => {
+            if (!(error instanceof request_error_1.RequestError) ||
+                (error.status !== 404 && error.status !== 422)) {
+                throw error;
+            }
+            // Retain reads of tag names and Git revision expressions. A missing
+            // branch must not cache a tag's commit under its qualified branch name.
+            const objectRef = /[~^:]|^(HEAD$|heads\/|tags\/|remotes\/)|^[a-f\d]{4,39}$/i.test(ref)
+                ? ref
+                : `refs/tags/${ref}`;
+            return objectRef === ref
+                ? this.getObjectSha(ref)
+                : this.getCachedRefSha(ref, () => this.getObjectSha(objectRef));
+        });
+    }
+    getObjectSha(ref) {
+        return this.getCachedRefSha(ref, async () => {
+            const response = await this.octokit.repos.getCommit({
+                owner: this.repository.owner,
+                repo: this.repository.repo,
+                ref,
+                headers: { accept: 'application/vnd.github.sha' },
+            });
+            return response.data;
+        });
+    }
+    getCachedRefSha(ref, resolve) {
+        let pending = this.refShas.get(ref);
+        if (!pending) {
+            pending = resolve()
+                .then(sha => {
+                if (typeof sha !== 'string' || !/^[a-f\d]{40}$/i.test(sha.trim())) {
+                    throw new Error(`Could not resolve ${ref} to a commit SHA`);
+                }
+                return sha.trim();
+            })
+                .catch(error => {
+                this.refShas.delete(ref);
+                throw error;
+            });
+            this.refShas.set(ref, pending);
+        }
+        return pending;
     }
     static async create(options) {
         const gitHubApi = await github_api_1.GitHubApi.create(options);
@@ -42370,53 +42442,60 @@ class GitHub {
         var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
         var _l;
         this.logger.debug(`Fetching merge commits on branch ${targetBranch} with cursor: ${cursor}`);
+        let sha;
+        try {
+            sha = await this.getRefSha(targetBranch);
+        }
+        catch (error) {
+            if (error instanceof request_error_1.RequestError && error.status === 404)
+                return null;
+            throw error;
+        }
         const query = `query pullRequestsSince($owner: String!, $repo: String!, $num: Int!, $maxFilesChanged: Int, $targetBranch: String!, $cursor: String) {
       repository(owner: $owner, name: $repo) {
-        ref(qualifiedName: $targetBranch) {
-          target {
-            ... on Commit {
-              history(first: $num, after: $cursor) {
-                nodes {
-                  associatedPullRequests(first: 10) {
-                    nodes {
-                      number
-                      title
-                      baseRefName
-                      headRefName
-                      labels(first: 10) {
-                        nodes {
-                          name
-                        }
+        object(expression: $targetBranch) {
+          ... on Commit {
+            history(first: $num, after: $cursor) {
+              nodes {
+                associatedPullRequests(first: 10) {
+                  nodes {
+                    number
+                    title
+                    baseRefName
+                    headRefName
+                    labels(first: 10) {
+                      nodes {
+                        name
                       }
-                      body
-                      mergeCommit {
-                        oid
+                    }
+                    body
+                    mergeCommit {
+                      oid
+                    }
+                    files(first: $maxFilesChanged) {
+                      nodes {
+                        path
                       }
-                      files(first: $maxFilesChanged) {
-                        nodes {
-                          path
-                        }
-                        pageInfo {
-                          endCursor
-                          hasNextPage
-                        }
+                      pageInfo {
+                        endCursor
+                        hasNextPage
                       }
                     }
                   }
-                  sha: oid
-                  message
-                  author {
-                    name
-                    email
-                    user {
-                      login
-                    }
+                }
+                sha: oid
+                message
+                author {
+                  name
+                  email
+                  user {
+                    login
                   }
                 }
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
               }
             }
           }
@@ -42428,7 +42507,7 @@ class GitHub {
             owner: this.repository.owner,
             repo: this.repository.repo,
             num: (_a = options.batchSize) !== null && _a !== void 0 ? _a : 10,
-            targetBranch,
+            targetBranch: sha,
             maxFilesChanged: 100, // max is 100
         };
         const response = await this.graphqlRequest({
@@ -42439,12 +42518,12 @@ class GitHub {
             this.logger.warn(`Did not receive a response for query: ${query}`, params);
             return null;
         }
-        // if the branch does exist, return null
-        if (!((_b = response.repository) === null || _b === void 0 ? void 0 : _b.ref)) {
+        // If the commit does not exist, return null.
+        if (!((_b = response.repository) === null || _b === void 0 ? void 0 : _b.object)) {
             this.logger.warn(`Could not find commits for branch ${targetBranch} - it likely does not exist.`);
             return null;
         }
-        const history = response.repository.ref.target.history;
+        const history = response.repository.object.history;
         const commits = (history.nodes || []);
         // Count the number of pull requests associated with each merge commit. This is
         // used in the next step to make sure we only find pull requests with a
@@ -42604,7 +42683,7 @@ class GitHub {
     async getFileContentsOnBranch(path, branch) {
         this.logger.debug(`Fetching ${path} from branch ${branch}`);
         try {
-            return await this.fileCache.getFileContents(path, branch);
+            return await this.fileCache.getFileContents(path, await this.getRefSha(branch));
         }
         catch (e) {
             if (e instanceof git_file_utils_1.FileNotFoundError) {
@@ -42664,6 +42743,7 @@ class GitHub {
             branch: pullRequest.headBranchName,
             description: pullRequest.body,
             primary: targetBranch,
+            baseSha: changes.size ? await this.getRefSha(targetBranch) : undefined,
             force: true,
             fork: !!(options === null || options === void 0 ? void 0 : options.fork),
             message,
@@ -42723,6 +42803,7 @@ class GitHub {
             branch: releasePullRequest.headRefName,
             description: body,
             primary: targetBranch,
+            baseSha: changes.size ? await this.getRefSha(targetBranch) : undefined,
             force: true,
             fork: (options === null || options === void 0 ? void 0 : options.fork) === false ? false : true,
             message,
@@ -42743,6 +42824,7 @@ class GitHub {
      * @throws {GitHubAPIError} on an API error
      */
     async buildChangeSet(updates, defaultBranch) {
+        var _a;
         // Sometimes multiple updates are proposed for the same file,
         // such as when the manifest file is additionally changed by the
         // node-workspace plugin. We need to merge these updates.
@@ -42770,7 +42852,7 @@ class GitHub {
             if (updatedContent) {
                 changes.set(update.path, {
                     content: updatedContent,
-                    originalContent: (content === null || content === void 0 ? void 0 : content.parsedContent) || null,
+                    originalContent: (_a = content === null || content === void 0 ? void 0 : content.parsedContent) !== null && _a !== void 0 ? _a : null,
                     mode: (content === null || content === void 0 ? void 0 : content.mode) || git_file_utils_1.DEFAULT_FILE_MODE,
                 });
             }
@@ -42852,7 +42934,7 @@ class GitHub {
      * @returns {string} HTML URL of the new file
      */
     async createFileOnNewBranch(filename, contents, newBranchName, baseBranchName) {
-        return await this.gitHubApi.createFileOnNewBranch(filename, contents, newBranchName, baseBranchName);
+        return await this.gitHubApi.createFileOnNewBranch(filename, contents, newBranchName, baseBranchName, await this.getRefSha(baseBranchName));
     }
 }
 exports.GitHub = GitHub;
@@ -53638,15 +53720,16 @@ exports.createBranch = createBranch;
  * @param {RepoDomain} upstream The domain information of the remote upstream repository
  * @param {string} name The branch name to create on the origin repository
  * @param {string} baseBranch the name of the branch to base the new branch off of. Default is main
+ * @param {string} baseSha Optional immutable commit used to generate the changes
  * @returns {Promise<string>} the base SHA for subsequent commits to be based off for the origin branch
  */
-async function branch(octokit, origin, upstream, name, baseBranch = DEFAULT_PRIMARY_BRANCH) {
-    // create branch from primary branch HEAD SHA
+async function branch(octokit, origin, upstream, name, baseBranch = DEFAULT_PRIMARY_BRANCH, baseSha) {
+    // Preserve the generation's parent instead of resolving a newer branch head.
     try {
-        const baseSha = await getBranchHead(octokit, upstream, baseBranch);
+        const parentSha = baseSha !== null && baseSha !== void 0 ? baseSha : (await getBranchHead(octokit, upstream, baseBranch));
         const duplicate = await existsBranchWithName(octokit, origin, name);
-        await createBranch(octokit, origin, name, baseSha, duplicate);
-        return baseSha;
+        await createBranch(octokit, origin, name, parentSha, duplicate);
+        return parentSha;
     }
     catch (err) {
         logger_1.logger.error('Error when creating branch');
@@ -54069,7 +54152,8 @@ const commit_and_push_1 = __nccwpck_require__(5436);
 const open_pull_request_1 = __nccwpck_require__(75220);
 const labels_1 = __nccwpck_require__(46498);
 /**
- * Make a new GitHub Pull Request with a set of changes applied on top of primary branch HEAD.
+ * Make a new GitHub Pull Request with changes applied on top of options.baseSha,
+ * or the current primary branch HEAD when that immutable parent is omitted.
  * The changes are committed into a new branch based on the upstream repository options using the authenticated Octokit account.
  * Then a Pull Request is made from that branch.
  *
@@ -54130,7 +54214,7 @@ async function createPullRequest(octokit, changes, options) {
     };
     // The `retry` flag defaults to `5` to maintain compatibility
     options.retry = options.retry === undefined ? 5 : options.retry;
-    const refHeadSha = await retry(async () => await (0, branch_1.branch)(octokit, origin, upstream, originBranch.branch, gitHubConfigs.primary), {
+    const refHeadSha = await retry(async () => await (0, branch_1.branch)(octokit, origin, upstream, originBranch.branch, gitHubConfigs.primary, options.baseSha), {
         retries: options.retry,
         factor: 2.8411,
         minTimeout: 3000,
